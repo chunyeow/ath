@@ -890,7 +890,8 @@ static int ath10k_vdev_start_restart(struct ath10k_vif *arvif, bool restart)
 		/* For now allow DFS for AP mode */
 		arg.channel.chan_radar =
 			!!(chandef->chan->flags & IEEE80211_CHAN_RADAR);
-	} else if (arvif->vdev_type == WMI_VDEV_TYPE_IBSS) {
+	} else if (arvif->vdev_type == WMI_VDEV_TYPE_IBSS ||
+		   arvif->vdev_type == WMI_VDEV_TYPE_MESH) {
 		arg.ssid = arvif->vif->bss_conf.ssid;
 		arg.ssid_len = arvif->vif->bss_conf.ssid_len;
 	}
@@ -1472,6 +1473,10 @@ static void ath10k_peer_assoc_h_qos(struct ath10k *ar,
 			arg->peer_flags |= WMI_PEER_QOS;
 		break;
 	case WMI_VDEV_TYPE_IBSS:
+		if (sta->wme)
+			arg->peer_flags |= WMI_PEER_QOS;
+		break;
+	case WMI_VDEV_TYPE_MESH:
 		if (sta->wme)
 			arg->peer_flags |= WMI_PEER_QOS;
 		break;
@@ -2999,6 +3004,9 @@ static int ath10k_add_interface(struct ieee80211_hw *hw,
 	case NL80211_IFTYPE_MONITOR:
 		arvif->vdev_type = WMI_VDEV_TYPE_MONITOR;
 		break;
+	case NL80211_IFTYPE_MESH_POINT:
+		arvif->vdev_type = WMI_VDEV_TYPE_MESH;
+		break;
 	default:
 		WARN_ON(1);
 		break;
@@ -3021,7 +3029,8 @@ static int ath10k_add_interface(struct ieee80211_hw *hw,
 	 * become corrupted, e.g. have garbled IEs or out-of-date TIM bitmap.
 	 */
 	if (vif->type == NL80211_IFTYPE_ADHOC ||
-	    vif->type == NL80211_IFTYPE_AP) {
+	    vif->type == NL80211_IFTYPE_AP ||
+	    vif->type == NL80211_IFTYPE_MESH_POINT) {
 		arvif->beacon_buf = dma_zalloc_coherent(ar->dev,
 							IEEE80211_MAX_FRAME_LEN,
 							&arvif->beacon_paddr,
@@ -3038,8 +3047,15 @@ static int ath10k_add_interface(struct ieee80211_hw *hw,
 		   arvif->vdev_id, arvif->vdev_type, arvif->vdev_subtype,
 		   arvif->beacon_buf ? "single-buf" : "per-skb");
 
-	ret = ath10k_wmi_vdev_create(ar, arvif->vdev_id, arvif->vdev_type,
-				     arvif->vdev_subtype, vif->addr);
+	/* Use IBSS mode for Mesh Point, AP mode causes fw crashed */
+	if (vif->type == NL80211_IFTYPE_MESH_POINT)
+		ret = ath10k_wmi_vdev_create(ar, arvif->vdev_id,
+					     WMI_VDEV_TYPE_IBSS,
+					     arvif->vdev_subtype, vif->addr);
+	else
+		ret = ath10k_wmi_vdev_create(ar, arvif->vdev_id,
+					     arvif->vdev_type,
+					     arvif->vdev_subtype, vif->addr);
 	if (ret) {
 		ath10k_warn(ar, "failed to create WMI vdev %i: %d\n",
 			    arvif->vdev_id, ret);
@@ -3082,7 +3098,8 @@ static int ath10k_add_interface(struct ieee80211_hw *hw,
 		}
 	}
 
-	if (arvif->vdev_type == WMI_VDEV_TYPE_AP) {
+	if (arvif->vdev_type == WMI_VDEV_TYPE_AP ||
+	    arvif->vdev_type == WMI_VDEV_TYPE_MESH) {
 		ret = ath10k_peer_create(ar, arvif->vdev_id, vif->addr);
 		if (ret) {
 			ath10k_warn(ar, "failed to create vdev %i peer for AP: %d\n",
@@ -3688,6 +3705,7 @@ static int ath10k_mac_inc_num_stations(struct ath10k_vif *arvif)
 	lockdep_assert_held(&ar->conf_mutex);
 
 	if (arvif->vdev_type != WMI_VDEV_TYPE_AP &&
+	    arvif->vdev_type != WMI_VDEV_TYPE_MESH &&
 	    arvif->vdev_type != WMI_VDEV_TYPE_IBSS)
 		return 0;
 
@@ -3706,6 +3724,7 @@ static void ath10k_mac_dec_num_stations(struct ath10k_vif *arvif)
 	lockdep_assert_held(&ar->conf_mutex);
 
 	if (arvif->vdev_type != WMI_VDEV_TYPE_AP &&
+	    arvif->vdev_type != WMI_VDEV_TYPE_MESH &&
 	    arvif->vdev_type != WMI_VDEV_TYPE_IBSS)
 		return;
 
@@ -3807,6 +3826,7 @@ static int ath10k_sta_state(struct ieee80211_hw *hw,
 	} else if (old_state == IEEE80211_STA_AUTH &&
 		   new_state == IEEE80211_STA_ASSOC &&
 		   (vif->type == NL80211_IFTYPE_AP ||
+		    vif->type == NL80211_IFTYPE_MESH_POINT ||
 		    vif->type == NL80211_IFTYPE_ADHOC)) {
 		/*
 		 * New association.
@@ -3821,6 +3841,7 @@ static int ath10k_sta_state(struct ieee80211_hw *hw,
 	} else if (old_state == IEEE80211_STA_ASSOC &&
 		   new_state == IEEE80211_STA_AUTH &&
 		   (vif->type == NL80211_IFTYPE_AP ||
+		    vif->type == NL80211_IFTYPE_MESH_POINT ||
 		    vif->type == NL80211_IFTYPE_ADHOC)) {
 		/*
 		 * Disassociation.
@@ -5152,6 +5173,8 @@ int ath10k_mac_register(struct ath10k *ar)
 		ar->hw->wiphy->n_iface_combinations =
 			ARRAY_SIZE(ath10k_if_comb);
 		ar->hw->wiphy->interface_modes |= BIT(NL80211_IFTYPE_ADHOC);
+		ar->hw->wiphy->interface_modes |=
+			BIT(NL80211_IFTYPE_MESH_POINT);
 		break;
 	case ATH10K_FW_WMI_OP_VERSION_10_1:
 	case ATH10K_FW_WMI_OP_VERSION_10_2:

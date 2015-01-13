@@ -4083,17 +4083,22 @@ ath10k_wmi_op_gen_vdev_start(struct ath10k *ar,
 			     const struct wmi_vdev_start_request_arg *arg,
 			     bool restart)
 {
+	struct ath10k_vif *arvif;
 	struct wmi_vdev_start_request_cmd *cmd;
 	struct sk_buff *skb;
 	const char *cmdname;
 	u32 flags = 0;
 
-	if (WARN_ON(arg->ssid && arg->ssid_len == 0))
-		return ERR_PTR(-EINVAL);
-	if (WARN_ON(arg->hidden_ssid && !arg->ssid))
-		return ERR_PTR(-EINVAL);
-	if (WARN_ON(arg->ssid_len > sizeof(cmd->ssid.ssid)))
-		return ERR_PTR(-EINVAL);
+	list_for_each_entry(arvif, &ar->arvifs, list) {
+		if (arvif->vdev_type != WMI_VDEV_TYPE_MESH) {
+			if (WARN_ON(arg->ssid && arg->ssid_len == 0))
+				return ERR_PTR(-EINVAL);
+			if (WARN_ON(arg->hidden_ssid && !arg->ssid))
+				return ERR_PTR(-EINVAL);
+			if (WARN_ON(arg->ssid_len > sizeof(cmd->ssid.ssid)))
+				return ERR_PTR(-EINVAL);
+		}
+	}
 
 	if (restart)
 		cmdname = "restart";

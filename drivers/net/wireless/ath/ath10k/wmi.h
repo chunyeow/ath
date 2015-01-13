@@ -3187,6 +3187,7 @@ enum wmi_vdev_type {
 	WMI_VDEV_TYPE_STA     = 2,
 	WMI_VDEV_TYPE_IBSS    = 3,
 	WMI_VDEV_TYPE_MONITOR = 4,
+	WMI_VDEV_TYPE_MESH    = 5,
 };
 
 enum wmi_vdev_subtype {
