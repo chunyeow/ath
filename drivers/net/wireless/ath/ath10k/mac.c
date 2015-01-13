@@ -996,7 +996,10 @@ static void ath10k_control_beaconing(struct ath10k_vif *arvif,
 		return;
 
 	arvif->aid = 0;
-	ether_addr_copy(arvif->bssid, info->bssid);
+	if (arvif->vdev_type != WMI_VDEV_TYPE_MESH)
+		ether_addr_copy(arvif->bssid, info->bssid);
+	else
+		ether_addr_copy(arvif->bssid, &mesh_addr);
 
 	ret = ath10k_wmi_vdev_up(arvif->ar, arvif->vdev_id, arvif->aid,
 				 arvif->bssid);

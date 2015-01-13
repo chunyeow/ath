@@ -23,6 +23,8 @@
 
 #define WEP_KEYID_SHIFT 6
 
+static const u8 mesh_addr[ETH_ALEN] = { 0x00, 0x0B, 0x6B, 0x02, 0xC9, 0x22 };
+
 struct ath10k_generic_iter {
 	struct ath10k *ar;
 	int ret;

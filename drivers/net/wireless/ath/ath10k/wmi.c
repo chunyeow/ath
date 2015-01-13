@@ -2210,6 +2210,7 @@ void ath10k_wmi_event_host_swba(struct ath10k *ar, struct sk_buff *skb)
 	struct sk_buff *bcn;
 	dma_addr_t paddr;
 	int ret, vdev_id = 0;
+	struct ieee80211_hdr *hdr;
 
 	ret = ath10k_wmi_pull_swba(ar, skb, &arg);
 	if (ret) {
@@ -2275,6 +2276,11 @@ void ath10k_wmi_event_host_swba(struct ath10k *ar, struct sk_buff *skb)
 		ath10k_tx_h_seq_no(arvif->vif, bcn);
 		ath10k_wmi_update_tim(ar, arvif, bcn, tim_info);
 		ath10k_wmi_update_noa(ar, arvif, bcn, noa_info);
+
+		if (arvif->vdev_type == WMI_VDEV_TYPE_MESH) {
+			hdr = (struct ieee80211_hdr *)bcn->data;
+			ether_addr_copy(hdr->addr3, &mesh_addr);
+		}
 
 		spin_lock_bh(&ar->data_lock);
 
