@@ -2133,6 +2133,13 @@ static void ath10k_tx_htt(struct ath10k *ar, struct sk_buff *skb)
 		goto exit;
 	}
 
+	arvif = ath10k_get_arvif(ar, ATH10K_SKB_CB(skb)->vdev_id);
+	if (!arvif) {
+		ath10k_warn("no vif for vdev_id %d found\n",
+			    ATH10K_SKB_CB(skb)->vdev_id);
+		return;
+	}
+
 	if (arvif->vdev_type == WMI_VDEV_TYPE_MESH) {
 		/* For broadcast mgmt frame, we need to specify the MAC address
 		 * of address 3 in the frame. For broadcast data frame, we need

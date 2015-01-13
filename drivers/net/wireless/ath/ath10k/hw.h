@@ -132,7 +132,7 @@ struct ath10k_pktlog_hdr {
 
 /* Native Wifi decap mode is used to align IP frames to 4-byte boundaries and
  * avoid a very expensive re-alignment in mac80211. */
-#define TARGET_RX_DECAP_MODE			ATH10K_HW_TXRX_NATIVE_WIFI
+#define TARGET_RX_DECAP_MODE			ATH10K_HW_TXRX_RAW
 
 #define TARGET_SCAN_MAX_PENDING_REQS		4
 #define TARGET_BMISS_OFFLOAD_MAX_VDEV		3
