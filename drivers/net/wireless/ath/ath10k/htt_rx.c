@@ -804,6 +804,12 @@ static void ath10k_process_rx(struct ath10k *ar,
 	trace_ath10k_rx_hdr(ar, skb->data, skb->len);
 	trace_ath10k_rx_payload(ar, skb->data, skb->len);
 
+	/* Workaround by replacing addr2 to addr3 for
+	 * upper layer MAC differentiation.
+	 */
+	if (is_multicast_ether_addr(ieee80211_get_DA(hdr)))
+		ether_addr_copy(hdr->addr2, hdr->addr3);
+
 	ieee80211_rx(ar->hw, skb);
 }
 

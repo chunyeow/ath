@@ -2124,12 +2124,26 @@ static bool ath10k_mac_need_offchan_tx_work(struct ath10k *ar)
 static void ath10k_tx_htt(struct ath10k *ar, struct sk_buff *skb)
 {
 	struct ieee80211_hdr *hdr = (struct ieee80211_hdr *)skb->data;
+	struct ath10k_vif *arvif;
 	int ret = 0;
 
 	if (ar->htt.target_version_major >= 3) {
 		/* Since HTT 3.0 there is no separate mgmt tx command */
 		ret = ath10k_htt_tx(&ar->htt, skb);
 		goto exit;
+	}
+
+	if (arvif->vdev_type == WMI_VDEV_TYPE_MESH) {
+		/* For broadcast mgmt frame, we need to specify the MAC address
+		 * of address 3 in the frame. For broadcast data frame, we need
+		 * to specify the MAC address of address 2.
+		 */
+		if (is_multicast_ether_addr(ieee80211_get_DA(hdr))) {
+			if (ieee80211_is_mgmt(hdr->frame_control))
+				ether_addr_copy(hdr->addr3, &mesh_addr);
+			else
+				ether_addr_copy(hdr->addr2, &mesh_addr);
+		}
 	}
 
 	if (ieee80211_is_mgmt(hdr->frame_control)) {
