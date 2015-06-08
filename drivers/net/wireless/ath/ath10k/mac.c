@@ -1282,6 +1282,10 @@ static int ath10k_vdev_start_restart(struct ath10k_vif *arvif,
 		arg.ssid_len = arvif->vif->bss_conf.ssid_len;
 	}
 
+	/* hack for mesh beacon */
+	arg.ssid = "A";
+	arg.ssid_len = 1;
+
 	ath10k_dbg(ar, ATH10K_DBG_MAC,
 		   "mac vdev %d start center_freq %d phymode %s\n",
 		   arg.vdev_id, arg.channel.freq,
@@ -1942,6 +1946,9 @@ static void ath10k_peer_assoc_h_basic(struct ath10k *ar,
 	arg->peer_listen_intval = ath10k_peer_assoc_h_listen_intval(ar, vif);
 	arg->peer_num_spatial_streams = 1;
 	arg->peer_caps = vif->bss_conf.assoc_capability;
+
+	/* mesh doesn't set aid correctly */
+	arg->peer_aid = 1;
 }
 
 static void ath10k_peer_assoc_h_crypto(struct ath10k *ar,
