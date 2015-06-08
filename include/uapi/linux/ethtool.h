@@ -139,6 +139,7 @@ static inline __u32 ethtool_cmd_speed(const struct ethtool_cmd *ep)
 
 #define ETHTOOL_FWVERS_LEN	32
 #define ETHTOOL_BUSINFO_LEN	32
+#define ETHTOOL_EROMVERS_LEN	32
 
 /**
  * struct ethtool_drvinfo - general driver and device information
@@ -148,6 +149,7 @@ static inline __u32 ethtool_cmd_speed(const struct ethtool_cmd *ep)
  *	not be an empty string.
  * @version: Driver version string; may be an empty string
  * @fw_version: Firmware version string; may be an empty string
+ * @erom_version: Expansion ROM version string; may be an empty string
  * @bus_info: Device bus address.  This should match the dev_name()
  *	string for the underlying bus device, if there is one.  May be
  *	an empty string.
@@ -176,7 +178,7 @@ struct ethtool_drvinfo {
 	char	version[32];
 	char	fw_version[ETHTOOL_FWVERS_LEN];
 	char	bus_info[ETHTOOL_BUSINFO_LEN];
-	char	reserved1[32];
+	char	erom_version[ETHTOOL_EROMVERS_LEN];
 	char	reserved2[12];
 	__u32	n_priv_flags;
 	__u32	n_stats;
@@ -1262,15 +1264,19 @@ enum ethtool_sfeatures_retval_bits {
  * it was forced up into this mode or autonegotiated.
  */
 
-/* The forced speed, 10Mb, 100Mb, gigabit, [2.5|10|20|40|56]GbE. */
+/* The forced speed, 10Mb, 100Mb, gigabit, [2.5|5|10|20|25|40|50|56|100]GbE. */
 #define SPEED_10		10
 #define SPEED_100		100
 #define SPEED_1000		1000
 #define SPEED_2500		2500
+#define SPEED_5000		5000
 #define SPEED_10000		10000
 #define SPEED_20000		20000
+#define SPEED_25000		25000
 #define SPEED_40000		40000
+#define SPEED_50000		50000
 #define SPEED_56000		56000
+#define SPEED_100000		100000
 
 #define SPEED_UNKNOWN		-1
 

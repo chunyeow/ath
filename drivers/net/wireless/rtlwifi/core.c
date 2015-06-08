@@ -195,7 +195,7 @@ static void rtl_op_stop(struct ieee80211_hw *hw)
 	if (!(support_remote_wakeup &&
 	      rtlhal->enter_pnp_sleep)) {
 		mac->link_state = MAC80211_NOLINK;
-		memset(mac->bssid, 0, 6);
+		eth_zero_addr(mac->bssid);
 		mac->vendor = PEER_UNKNOWN;
 
 		/* reset sec info */
@@ -357,7 +357,7 @@ static void rtl_op_remove_interface(struct ieee80211_hw *hw,
 	mac->p2p = 0;
 	mac->vif = NULL;
 	mac->link_state = MAC80211_NOLINK;
-	memset(mac->bssid, 0, ETH_ALEN);
+	eth_zero_addr(mac->bssid);
 	mac->vendor = PEER_UNKNOWN;
 	mac->opmode = NL80211_IFTYPE_UNSPECIFIED;
 	rtlpriv->cfg->ops->set_network_type(hw, mac->opmode);
@@ -1010,6 +1010,16 @@ static int rtl_op_conf_tx(struct ieee80211_hw *hw,
 	return 0;
 }
 
+static void send_beacon_frame(struct ieee80211_hw *hw,
+			      struct ieee80211_vif *vif)
+{
+	struct rtl_priv *rtlpriv = rtl_priv(hw);
+	struct sk_buff *skb = ieee80211_beacon_get(hw, vif);
+
+	if (skb)
+		rtlpriv->intf_ops->adapter_tx(hw, NULL, skb, NULL);
+}
+
 static void rtl_op_bss_info_changed(struct ieee80211_hw *hw,
 				    struct ieee80211_vif *vif,
 				    struct ieee80211_bss_conf *bss_conf,
@@ -1040,6 +1050,7 @@ static void rtl_op_bss_info_changed(struct ieee80211_hw *hw,
 
 				if (rtlpriv->cfg->ops->linked_set_reg)
 					rtlpriv->cfg->ops->linked_set_reg(hw);
+				send_beacon_frame(hw, vif);
 			}
 		}
 		if ((changed & BSS_CHANGED_BEACON_ENABLED &&
@@ -1146,7 +1157,7 @@ static void rtl_op_bss_info_changed(struct ieee80211_hw *hw,
 			if (ppsc->p2p_ps_info.p2p_ps_mode > P2P_PS_NONE)
 				rtl_p2p_ps_cmd(hw, P2P_PS_DISABLE);
 			mac->link_state = MAC80211_NOLINK;
-			memset(mac->bssid, 0, ETH_ALEN);
+			eth_zero_addr(mac->bssid);
 			mac->vendor = PEER_UNKNOWN;
 			mac->mode = 0;
 

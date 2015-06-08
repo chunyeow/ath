@@ -160,6 +160,7 @@ enum {
 #define NETIF_F_ONE_FOR_ALL	(NETIF_F_GSO_SOFTWARE | NETIF_F_GSO_ROBUST | \
 				 NETIF_F_SG | NETIF_F_HIGHDMA |		\
 				 NETIF_F_FRAGLIST | NETIF_F_VLAN_CHALLENGED)
+
 /*
  * If one device doesn't support one of these features, then disable it
  * for all in netdev_increment_features.

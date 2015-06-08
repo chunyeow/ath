@@ -19,6 +19,7 @@
 #include <net/netlink.h>
 
 #include <linux/netfilter.h>
+#include <linux/netfilter_bridge.h>
 #include <linux/netfilter/ipset/pfxlen.h>
 #include <linux/netfilter/ipset/ip_set.h>
 #include <linux/netfilter/ipset/ip_set_hash.h>
@@ -192,10 +193,10 @@ hash_netiface4_data_list(struct sk_buff *skb,
 	    (flags &&
 	     nla_put_net32(skb, IPSET_ATTR_CADT_FLAGS, htonl(flags))))
 		goto nla_put_failure;
-	return 0;
+	return false;
 
 nla_put_failure:
-	return 1;
+	return true;
 }
 
 static inline void
@@ -206,10 +207,25 @@ hash_netiface4_data_next(struct hash_netiface4_elem *next,
 }
 
 #define MTYPE		hash_netiface4
-#define PF		4
 #define HOST_MASK	32
 #define HKEY_DATALEN	sizeof(struct hash_netiface4_elem_hashed)
 #include "ip_set_hash_gen.h"
+
+#if IS_ENABLED(CONFIG_BRIDGE_NETFILTER)
+static const char *get_physindev_name(const struct sk_buff *skb)
+{
+	struct net_device *dev = nf_bridge_get_physindev(skb);
+
+	return dev ? dev->name : NULL;
+}
+
+static const char *get_phyoutdev_name(const struct sk_buff *skb)
+{
+	struct net_device *dev = nf_bridge_get_physoutdev(skb);
+
+	return dev ? dev->name : NULL;
+}
+#endif
 
 static int
 hash_netiface4_kadt(struct ip_set *set, const struct sk_buff *skb,
@@ -234,16 +250,15 @@ hash_netiface4_kadt(struct ip_set *set, const struct sk_buff *skb,
 	e.ip &= ip_set_netmask(e.cidr);
 
 #define IFACE(dir)	(par->dir ? par->dir->name : NULL)
-#define PHYSDEV(dir)	(nf_bridge->dir ? nf_bridge->dir->name : NULL)
 #define SRCDIR		(opt->flags & IPSET_DIM_TWO_SRC)
 
 	if (opt->cmdflags & IPSET_FLAG_PHYSDEV) {
 #if IS_ENABLED(CONFIG_BRIDGE_NETFILTER)
-		const struct nf_bridge_info *nf_bridge = skb->nf_bridge;
+		e.iface = SRCDIR ? get_physindev_name(skb) :
+				   get_phyoutdev_name(skb);
 
-		if (!nf_bridge)
+		if (!e.iface)
 			return -EINVAL;
-		e.iface = SRCDIR ? PHYSDEV(physindev) : PHYSDEV(physoutdev);
 		e.physdev = 1;
 #else
 		e.iface = NULL;
@@ -292,8 +307,11 @@ hash_netiface4_uadt(struct ip_set *set, struct nlattr *tb[],
 	if (tb[IPSET_ATTR_LINENO])
 		*lineno = nla_get_u32(tb[IPSET_ATTR_LINENO]);
 
-	ret = ip_set_get_hostipaddr4(tb[IPSET_ATTR_IP], &ip) ||
-	      ip_set_get_extensions(set, tb, &ext);
+	ret = ip_set_get_hostipaddr4(tb[IPSET_ATTR_IP], &ip);
+	if (ret)
+		return ret;
+
+	ret = ip_set_get_extensions(set, tb, &ext);
 	if (ret)
 		return ret;
 
@@ -428,10 +446,10 @@ hash_netiface6_data_list(struct sk_buff *skb,
 	    (flags &&
 	     nla_put_net32(skb, IPSET_ATTR_CADT_FLAGS, htonl(flags))))
 		goto nla_put_failure;
-	return 0;
+	return false;
 
 nla_put_failure:
-	return 1;
+	return true;
 }
 
 static inline void
@@ -441,12 +459,9 @@ hash_netiface6_data_next(struct hash_netiface4_elem *next,
 }
 
 #undef MTYPE
-#undef PF
 #undef HOST_MASK
-#undef HKEY_DATALEN
 
 #define MTYPE		hash_netiface6
-#define PF		6
 #define HOST_MASK	128
 #define HKEY_DATALEN	sizeof(struct hash_netiface6_elem_hashed)
 #define IP_SET_EMIT_CREATE
@@ -476,11 +491,11 @@ hash_netiface6_kadt(struct ip_set *set, const struct sk_buff *skb,
 
 	if (opt->cmdflags & IPSET_FLAG_PHYSDEV) {
 #if IS_ENABLED(CONFIG_BRIDGE_NETFILTER)
-		const struct nf_bridge_info *nf_bridge = skb->nf_bridge;
-
-		if (!nf_bridge)
+		e.iface = SRCDIR ? get_physindev_name(skb) :
+				   get_phyoutdev_name(skb);
+		if (!e.iface)
 			return -EINVAL;
-		e.iface = SRCDIR ? PHYSDEV(physindev) : PHYSDEV(physoutdev);
+
 		e.physdev = 1;
 #else
 		e.iface = NULL;
@@ -530,8 +545,11 @@ hash_netiface6_uadt(struct ip_set *set, struct nlattr *tb[],
 	if (tb[IPSET_ATTR_LINENO])
 		*lineno = nla_get_u32(tb[IPSET_ATTR_LINENO]);
 
-	ret = ip_set_get_ipaddr6(tb[IPSET_ATTR_IP], &e.ip) ||
-	      ip_set_get_extensions(set, tb, &ext);
+	ret = ip_set_get_ipaddr6(tb[IPSET_ATTR_IP], &e.ip);
+	if (ret)
+		return ret;
+
+	ret = ip_set_get_extensions(set, tb, &ext);
 	if (ret)
 		return ret;
 
@@ -597,7 +615,8 @@ static struct ip_set_type hash_netiface_type __read_mostly = {
 		[IPSET_ATTR_LINENO]	= { .type = NLA_U32 },
 		[IPSET_ATTR_BYTES]	= { .type = NLA_U64 },
 		[IPSET_ATTR_PACKETS]	= { .type = NLA_U64 },
-		[IPSET_ATTR_COMMENT]	= { .type = NLA_NUL_STRING },
+		[IPSET_ATTR_COMMENT]	= { .type = NLA_NUL_STRING,
+					    .len  = IPSET_MAX_COMMENT_SIZE },
 		[IPSET_ATTR_SKBMARK]	= { .type = NLA_U64 },
 		[IPSET_ATTR_SKBPRIO]	= { .type = NLA_U32 },
 		[IPSET_ATTR_SKBQUEUE]	= { .type = NLA_U16 },

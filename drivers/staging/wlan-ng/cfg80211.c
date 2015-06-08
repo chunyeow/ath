@@ -325,9 +325,9 @@ static int prism2_get_station(struct wiphy *wiphy, struct net_device *dev,
 
 	if (result == 0) {
 		sinfo->txrate.legacy = quality.txrate.data;
-		sinfo->filled |= STATION_INFO_TX_BITRATE;
+		sinfo->filled |= BIT(NL80211_STA_INFO_TX_BITRATE);
 		sinfo->signal = quality.level.data;
-		sinfo->filled |= STATION_INFO_SIGNAL;
+		sinfo->filled |= BIT(NL80211_STA_INFO_SIGNAL);
 	}
 
 	return result;
@@ -722,7 +722,7 @@ void prism2_connect_result(wlandevice_t *wlandev, u8 failed)
 void prism2_disconnected(wlandevice_t *wlandev)
 {
 	cfg80211_disconnected(wlandev->netdev, 0, NULL,
-		0, GFP_KERNEL);
+		0, false, GFP_KERNEL);
 }
 
 void prism2_roamed(wlandevice_t *wlandev)

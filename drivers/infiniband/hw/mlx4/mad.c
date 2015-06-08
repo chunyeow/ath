@@ -64,6 +64,14 @@ enum {
 #define GUID_TBL_BLK_NUM_ENTRIES 8
 #define GUID_TBL_BLK_SIZE (GUID_TBL_ENTRY_SIZE * GUID_TBL_BLK_NUM_ENTRIES)
 
+/* Counters should be saturate once they reach their maximum value */
+#define ASSIGN_32BIT_COUNTER(counter, value) do {\
+	if ((value) > U32_MAX)			 \
+		counter = cpu_to_be32(U32_MAX); \
+	else					 \
+		counter = cpu_to_be32(value);	 \
+} while (0)
+
 struct mlx4_mad_rcv_buf {
 	struct ib_grh grh;
 	u8 payload[256];
@@ -806,10 +814,14 @@ static int ib_process_mad(struct ib_device *ibdev, int mad_flags, u8 port_num,
 static void edit_counter(struct mlx4_counter *cnt,
 					struct ib_pma_portcounters *pma_cnt)
 {
-	pma_cnt->port_xmit_data = cpu_to_be32((be64_to_cpu(cnt->tx_bytes)>>2));
-	pma_cnt->port_rcv_data  = cpu_to_be32((be64_to_cpu(cnt->rx_bytes)>>2));
-	pma_cnt->port_xmit_packets = cpu_to_be32(be64_to_cpu(cnt->tx_frames));
-	pma_cnt->port_rcv_packets  = cpu_to_be32(be64_to_cpu(cnt->rx_frames));
+	ASSIGN_32BIT_COUNTER(pma_cnt->port_xmit_data,
+			     (be64_to_cpu(cnt->tx_bytes) >> 2));
+	ASSIGN_32BIT_COUNTER(pma_cnt->port_rcv_data,
+			     (be64_to_cpu(cnt->rx_bytes) >> 2));
+	ASSIGN_32BIT_COUNTER(pma_cnt->port_xmit_packets,
+			     be64_to_cpu(cnt->tx_frames));
+	ASSIGN_32BIT_COUNTER(pma_cnt->port_rcv_packets,
+			     be64_to_cpu(cnt->rx_frames));
 }
 
 static int iboe_process_mad(struct ib_device *ibdev, int mad_flags, u8 port_num,
@@ -1353,14 +1365,17 @@ static void mlx4_ib_multiplex_mad(struct mlx4_ib_demux_pv_ctx *ctx, struct ib_wc
 	 * stadard address handle by decoding the tunnelled mlx4_ah fields */
 	memcpy(&ah.av, &tunnel->hdr.av, sizeof (struct mlx4_av));
 	ah.ibah.device = ctx->ib_dev;
+
+	port = be32_to_cpu(ah.av.ib.port_pd) >> 24;
+	port = mlx4_slave_convert_port(dev->dev, slave, port);
+	if (port < 0)
+		return;
+	ah.av.ib.port_pd = cpu_to_be32(port << 24 | (be32_to_cpu(ah.av.ib.port_pd) & 0xffffff));
+
 	mlx4_ib_query_ah(&ah.ibah, &ah_attr);
 	if (ah_attr.ah_flags & IB_AH_GRH)
 		fill_in_real_sgid_index(dev, slave, ctx->port, &ah_attr);
 
-	port = mlx4_slave_convert_port(dev->dev, slave, ah_attr.port_num);
-	if (port < 0)
-		return;
-	ah_attr.port_num = port;
 	memcpy(ah_attr.dmac, tunnel->hdr.mac, 6);
 	ah_attr.vlan_id = be16_to_cpu(tunnel->hdr.vlan);
 	/* if slave have default vlan use it */
@@ -1418,6 +1433,10 @@ static int mlx4_ib_alloc_pv_bufs(struct mlx4_ib_demux_pv_ctx *ctx,
 							tun_qp->ring[i].addr,
 							rx_buf_size,
 							DMA_FROM_DEVICE);
+		if (ib_dma_mapping_error(ctx->ib_dev, tun_qp->ring[i].map)) {
+			kfree(tun_qp->ring[i].addr);
+			goto err;
+		}
 	}
 
 	for (i = 0; i < MLX4_NUM_TUNNEL_BUFS; i++) {
@@ -1430,6 +1449,11 @@ static int mlx4_ib_alloc_pv_bufs(struct mlx4_ib_demux_pv_ctx *ctx,
 					  tun_qp->tx_ring[i].buf.addr,
 					  tx_buf_size,
 					  DMA_TO_DEVICE);
+		if (ib_dma_mapping_error(ctx->ib_dev,
+					 tun_qp->tx_ring[i].buf.map)) {
+			kfree(tun_qp->tx_ring[i].buf.addr);
+			goto tx_err;
+		}
 		tun_qp->tx_ring[i].ah = NULL;
 	}
 	spin_lock_init(&tun_qp->tx_lock);
@@ -1951,7 +1975,8 @@ static int mlx4_ib_alloc_demux_ctx(struct mlx4_ib_dev *dev,
 	ctx->ib_dev = &dev->ib_dev;
 
 	for (i = 0;
-	     i < min(dev->dev->caps.sqp_demux, (u16)(dev->dev->num_vfs + 1));
+	     i < min(dev->dev->caps.sqp_demux,
+	     (u16)(dev->dev->persist->num_vfs + 1));
 	     i++) {
 		struct mlx4_active_ports actv_ports =
 			mlx4_get_active_ports(dev->dev, i);

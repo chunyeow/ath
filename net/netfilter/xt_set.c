@@ -15,8 +15,9 @@
 #include <linux/skbuff.h>
 
 #include <linux/netfilter/x_tables.h>
-#include <linux/netfilter/xt_set.h>
+#include <linux/netfilter/ipset/ip_set.h>
 #include <linux/netfilter/ipset/ip_set_timeout.h>
+#include <uapi/linux/netfilter/xt_set.h>
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Jozsef Kadlecsik <kadlec@blackhole.kfki.hu>");
@@ -193,7 +194,7 @@ set_match_v3(const struct sk_buff *skb, struct xt_action_param *par)
 		return ret;
 
 	if (!match_counter0(opt.ext.packets, &info->packets))
-		return 0;
+		return false;
 	return match_counter0(opt.ext.bytes, &info->bytes);
 }
 
@@ -239,7 +240,7 @@ set_match_v4(const struct sk_buff *skb, struct xt_action_param *par)
 		return ret;
 
 	if (!match_counter(opt.ext.packets, &info->packets))
-		return 0;
+		return false;
 	return match_counter(opt.ext.bytes, &info->bytes);
 }
 

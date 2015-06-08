@@ -87,10 +87,11 @@ static void xgene_enet_ring_rd32(struct xgene_enet_desc_ring *ring,
 
 static void xgene_enet_write_ring_state(struct xgene_enet_desc_ring *ring)
 {
+	struct xgene_enet_pdata *pdata = netdev_priv(ring->ndev);
 	int i;
 
 	xgene_enet_ring_wr32(ring, CSR_RING_CONFIG, ring->num);
-	for (i = 0; i < NUM_RING_CONFIG; i++) {
+	for (i = 0; i < pdata->ring_ops->num_ring_config; i++) {
 		xgene_enet_ring_wr32(ring, CSR_RING_WR_BASE + (i * 4),
 				     ring->state[i]);
 	}
@@ -98,7 +99,7 @@ static void xgene_enet_write_ring_state(struct xgene_enet_desc_ring *ring)
 
 static void xgene_enet_clr_ring_state(struct xgene_enet_desc_ring *ring)
 {
-	memset(ring->state, 0, sizeof(u32) * NUM_RING_CONFIG);
+	memset(ring->state, 0, sizeof(ring->state));
 	xgene_enet_write_ring_state(ring);
 }
 
@@ -141,8 +142,8 @@ static void xgene_enet_clr_desc_ring_id(struct xgene_enet_desc_ring *ring)
 	xgene_enet_ring_wr32(ring, CSR_RING_ID_BUF, 0);
 }
 
-struct xgene_enet_desc_ring *xgene_enet_setup_ring(
-					struct xgene_enet_desc_ring *ring)
+static struct xgene_enet_desc_ring *xgene_enet_setup_ring(
+				    struct xgene_enet_desc_ring *ring)
 {
 	u32 size = ring->size;
 	u32 i, data;
@@ -168,7 +169,7 @@ struct xgene_enet_desc_ring *xgene_enet_setup_ring(
 	return ring;
 }
 
-void xgene_enet_clear_ring(struct xgene_enet_desc_ring *ring)
+static void xgene_enet_clear_ring(struct xgene_enet_desc_ring *ring)
 {
 	u32 data;
 	bool is_bufpool;
@@ -184,6 +185,22 @@ void xgene_enet_clear_ring(struct xgene_enet_desc_ring *ring)
 out:
 	xgene_enet_clr_desc_ring_id(ring);
 	xgene_enet_clr_ring_state(ring);
+}
+
+static void xgene_enet_wr_cmd(struct xgene_enet_desc_ring *ring, int count)
+{
+	iowrite32(count, ring->cmd);
+}
+
+static u32 xgene_enet_ring_len(struct xgene_enet_desc_ring *ring)
+{
+	u32 __iomem *cmd_base = ring->cmd_base;
+	u32 ring_state, num_msgs;
+
+	ring_state = ioread32(&cmd_base[1]);
+	num_msgs = GET_VAL(NUMMSGSINQ, ring_state);
+
+	return num_msgs;
 }
 
 void xgene_enet_parse_error(struct xgene_enet_desc_ring *ring,
@@ -593,10 +610,12 @@ static int xgene_enet_reset(struct xgene_enet_pdata *pdata)
 	if (!xgene_ring_mgr_init(pdata))
 		return -ENODEV;
 
-	clk_prepare_enable(pdata->clk);
-	clk_disable_unprepare(pdata->clk);
-	clk_prepare_enable(pdata->clk);
-	xgene_enet_ecc_init(pdata);
+	if (pdata->clk) {
+		clk_prepare_enable(pdata->clk);
+		clk_disable_unprepare(pdata->clk);
+		clk_prepare_enable(pdata->clk);
+		xgene_enet_ecc_init(pdata);
+	}
 	xgene_enet_config_ring_if_assoc(pdata);
 
 	/* Enable auto-incr for scanning */
@@ -663,15 +682,20 @@ static int xgene_enet_phy_connect(struct net_device *ndev)
 	struct phy_device *phy_dev;
 	struct device *dev = &pdata->pdev->dev;
 
-	phy_np = of_parse_phandle(dev->of_node, "phy-handle", 0);
-	if (!phy_np) {
-		netdev_dbg(ndev, "No phy-handle found\n");
-		return -ENODEV;
+	if (dev->of_node) {
+		phy_np = of_parse_phandle(dev->of_node, "phy-handle", 0);
+		if (!phy_np) {
+			netdev_dbg(ndev, "No phy-handle found in DT\n");
+			return -ENODEV;
+		}
+		pdata->phy_dev = of_phy_find_device(phy_np);
 	}
 
-	phy_dev = of_phy_connect(ndev, phy_np, &xgene_enet_adjust_link,
-				 0, pdata->phy_mode);
-	if (!phy_dev) {
+	phy_dev = pdata->phy_dev;
+
+	if (!phy_dev ||
+	    phy_connect_direct(ndev, phy_dev, &xgene_enet_adjust_link,
+			       pdata->phy_mode)) {
 		netdev_err(ndev, "Could not connect to PHY\n");
 		return  -ENODEV;
 	}
@@ -681,31 +705,70 @@ static int xgene_enet_phy_connect(struct net_device *ndev)
 			      ~SUPPORTED_100baseT_Half &
 			      ~SUPPORTED_1000baseT_Half;
 	phy_dev->advertising = phy_dev->supported;
-	pdata->phy_dev = phy_dev;
 
 	return 0;
+}
+
+static int xgene_mdiobus_register(struct xgene_enet_pdata *pdata,
+				  struct mii_bus *mdio)
+{
+	struct device *dev = &pdata->pdev->dev;
+	struct net_device *ndev = pdata->ndev;
+	struct phy_device *phy;
+	struct device_node *child_np;
+	struct device_node *mdio_np = NULL;
+	int ret;
+	u32 phy_id;
+
+	if (dev->of_node) {
+		for_each_child_of_node(dev->of_node, child_np) {
+			if (of_device_is_compatible(child_np,
+						    "apm,xgene-mdio")) {
+				mdio_np = child_np;
+				break;
+			}
+		}
+
+		if (!mdio_np) {
+			netdev_dbg(ndev, "No mdio node in the dts\n");
+			return -ENXIO;
+		}
+
+		return of_mdiobus_register(mdio, mdio_np);
+	}
+
+	/* Mask out all PHYs from auto probing. */
+	mdio->phy_mask = ~0;
+
+	/* Register the MDIO bus */
+	ret = mdiobus_register(mdio);
+	if (ret)
+		return ret;
+
+	ret = device_property_read_u32(dev, "phy-channel", &phy_id);
+	if (ret)
+		ret = device_property_read_u32(dev, "phy-addr", &phy_id);
+	if (ret)
+		return -EINVAL;
+
+	phy = get_phy_device(mdio, phy_id, true);
+	if (!phy || IS_ERR(phy))
+		return -EIO;
+
+	ret = phy_device_register(phy);
+	if (ret)
+		phy_device_free(phy);
+	else
+		pdata->phy_dev = phy;
+
+	return ret;
 }
 
 int xgene_enet_mdio_config(struct xgene_enet_pdata *pdata)
 {
 	struct net_device *ndev = pdata->ndev;
-	struct device *dev = &pdata->pdev->dev;
-	struct device_node *child_np;
-	struct device_node *mdio_np = NULL;
 	struct mii_bus *mdio_bus;
 	int ret;
-
-	for_each_child_of_node(dev->of_node, child_np) {
-		if (of_device_is_compatible(child_np, "apm,xgene-mdio")) {
-			mdio_np = child_np;
-			break;
-		}
-	}
-
-	if (!mdio_np) {
-		netdev_dbg(ndev, "No mdio node in the dts\n");
-		return -ENXIO;
-	}
 
 	mdio_bus = mdiobus_alloc();
 	if (!mdio_bus)
@@ -720,7 +783,7 @@ int xgene_enet_mdio_config(struct xgene_enet_pdata *pdata)
 	mdio_bus->priv = pdata;
 	mdio_bus->parent = &ndev->dev;
 
-	ret = of_mdiobus_register(mdio_bus, mdio_np);
+	ret = xgene_mdiobus_register(pdata, mdio_bus);
 	if (ret) {
 		netdev_err(ndev, "Failed to register MDIO bus\n");
 		mdiobus_free(mdio_bus);
@@ -756,4 +819,13 @@ struct xgene_port_ops xgene_gport_ops = {
 	.reset = xgene_enet_reset,
 	.cle_bypass = xgene_enet_cle_bypass,
 	.shutdown = xgene_gport_shutdown,
+};
+
+struct xgene_ring_ops xgene_ring1_ops = {
+	.num_ring_config = NUM_RING_CONFIG,
+	.num_ring_id_shift = 6,
+	.setup = xgene_enet_setup_ring,
+	.clear = xgene_enet_clear_ring,
+	.wr_cmd = xgene_enet_wr_cmd,
+	.len = xgene_enet_ring_len,
 };

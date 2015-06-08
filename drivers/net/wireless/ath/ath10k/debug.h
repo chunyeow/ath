@@ -36,6 +36,7 @@ enum ath10k_debug_mask {
 	ATH10K_DBG_REGULATORY	= 0x00000800,
 	ATH10K_DBG_TESTMODE	= 0x00001000,
 	ATH10K_DBG_WMI_PRINT	= 0x00002000,
+	ATH10K_DBG_PCI_PS	= 0x00004000,
 	ATH10K_DBG_ANY		= 0xffffffff,
 };
 
@@ -46,6 +47,12 @@ enum ath10k_pktlog_filter {
 	ATH10K_PKTLOG_RCUPDATE   = 0x000000008,
 	ATH10K_PKTLOG_DBG_PRINT  = 0x000000010,
 	ATH10K_PKTLOG_ANY        = 0x00000001f,
+};
+
+enum ath10k_dbg_aggr_mode {
+	ATH10K_DBG_AGGR_MODE_AUTO,
+	ATH10K_DBG_AGGR_MODE_MANUAL,
+	ATH10K_DBG_AGGR_MODE_MAX,
 };
 
 extern unsigned int ath10k_debug_mask;
@@ -77,7 +84,6 @@ int ath10k_debug_get_et_sset_count(struct ieee80211_hw *hw,
 void ath10k_debug_get_et_stats(struct ieee80211_hw *hw,
 			       struct ieee80211_vif *vif,
 			       struct ethtool_stats *stats, u64 *data);
-
 #else
 static inline int ath10k_debug_start(struct ath10k *ar)
 {
@@ -129,6 +135,10 @@ ath10k_debug_get_new_fw_crash_data(struct ath10k *ar)
 #define ath10k_debug_get_et_stats NULL
 
 #endif /* CONFIG_ATH10K_DEBUGFS */
+#ifdef CONFIG_MAC80211_DEBUGFS
+void ath10k_sta_add_debugfs(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
+			    struct ieee80211_sta *sta, struct dentry *dir);
+#endif /* CONFIG_MAC80211_DEBUGFS */
 
 #ifdef CONFIG_ATH10K_DEBUG
 __printf(3, 4) void ath10k_dbg(struct ath10k *ar,

@@ -21,10 +21,13 @@
 #include <linux/bug.h>
 #include <linux/interrupt.h>
 #include <linux/dmapool.h>
+#include <linux/hashtable.h>
 #include <net/mac80211.h>
 
 #include "htc.h"
+#include "hw.h"
 #include "rx_desc.h"
+#include "hw.h"
 
 enum htt_dbg_stats_type {
 	HTT_DBG_STATS_WAL_PDEV_TXRX = 1 << 0,
@@ -270,22 +273,107 @@ enum htt_mgmt_tx_status {
 
 /*=== target -> host messages ===============================================*/
 
+enum htt_main_t2h_msg_type {
+	HTT_MAIN_T2H_MSG_TYPE_VERSION_CONF             = 0x0,
+	HTT_MAIN_T2H_MSG_TYPE_RX_IND                   = 0x1,
+	HTT_MAIN_T2H_MSG_TYPE_RX_FLUSH                 = 0x2,
+	HTT_MAIN_T2H_MSG_TYPE_PEER_MAP                 = 0x3,
+	HTT_MAIN_T2H_MSG_TYPE_PEER_UNMAP               = 0x4,
+	HTT_MAIN_T2H_MSG_TYPE_RX_ADDBA                 = 0x5,
+	HTT_MAIN_T2H_MSG_TYPE_RX_DELBA                 = 0x6,
+	HTT_MAIN_T2H_MSG_TYPE_TX_COMPL_IND             = 0x7,
+	HTT_MAIN_T2H_MSG_TYPE_PKTLOG                   = 0x8,
+	HTT_MAIN_T2H_MSG_TYPE_STATS_CONF               = 0x9,
+	HTT_MAIN_T2H_MSG_TYPE_RX_FRAG_IND              = 0xa,
+	HTT_MAIN_T2H_MSG_TYPE_SEC_IND                  = 0xb,
+	HTT_MAIN_T2H_MSG_TYPE_TX_INSPECT_IND           = 0xd,
+	HTT_MAIN_T2H_MSG_TYPE_MGMT_TX_COMPL_IND        = 0xe,
+	HTT_MAIN_T2H_MSG_TYPE_TX_CREDIT_UPDATE_IND     = 0xf,
+	HTT_MAIN_T2H_MSG_TYPE_RX_PN_IND                = 0x10,
+	HTT_MAIN_T2H_MSG_TYPE_RX_OFFLOAD_DELIVER_IND   = 0x11,
+	HTT_MAIN_T2H_MSG_TYPE_TEST,
+	/* keep this last */
+	HTT_MAIN_T2H_NUM_MSGS
+};
+
+enum htt_10x_t2h_msg_type {
+	HTT_10X_T2H_MSG_TYPE_VERSION_CONF              = 0x0,
+	HTT_10X_T2H_MSG_TYPE_RX_IND                    = 0x1,
+	HTT_10X_T2H_MSG_TYPE_RX_FLUSH                  = 0x2,
+	HTT_10X_T2H_MSG_TYPE_PEER_MAP                  = 0x3,
+	HTT_10X_T2H_MSG_TYPE_PEER_UNMAP                = 0x4,
+	HTT_10X_T2H_MSG_TYPE_RX_ADDBA                  = 0x5,
+	HTT_10X_T2H_MSG_TYPE_RX_DELBA                  = 0x6,
+	HTT_10X_T2H_MSG_TYPE_TX_COMPL_IND              = 0x7,
+	HTT_10X_T2H_MSG_TYPE_PKTLOG                    = 0x8,
+	HTT_10X_T2H_MSG_TYPE_STATS_CONF                = 0x9,
+	HTT_10X_T2H_MSG_TYPE_RX_FRAG_IND               = 0xa,
+	HTT_10X_T2H_MSG_TYPE_SEC_IND                   = 0xb,
+	HTT_10X_T2H_MSG_TYPE_RC_UPDATE_IND             = 0xc,
+	HTT_10X_T2H_MSG_TYPE_TX_INSPECT_IND            = 0xd,
+	HTT_10X_T2H_MSG_TYPE_TEST                      = 0xe,
+	HTT_10X_T2H_MSG_TYPE_CHAN_CHANGE               = 0xf,
+	HTT_10X_T2H_MSG_TYPE_AGGR_CONF                 = 0x11,
+	HTT_10X_T2H_MSG_TYPE_STATS_NOUPLOAD            = 0x12,
+	HTT_10X_T2H_MSG_TYPE_MGMT_TX_COMPL_IND         = 0x13,
+	/* keep this last */
+	HTT_10X_T2H_NUM_MSGS
+};
+
+enum htt_tlv_t2h_msg_type {
+	HTT_TLV_T2H_MSG_TYPE_VERSION_CONF              = 0x0,
+	HTT_TLV_T2H_MSG_TYPE_RX_IND                    = 0x1,
+	HTT_TLV_T2H_MSG_TYPE_RX_FLUSH                  = 0x2,
+	HTT_TLV_T2H_MSG_TYPE_PEER_MAP                  = 0x3,
+	HTT_TLV_T2H_MSG_TYPE_PEER_UNMAP                = 0x4,
+	HTT_TLV_T2H_MSG_TYPE_RX_ADDBA                  = 0x5,
+	HTT_TLV_T2H_MSG_TYPE_RX_DELBA                  = 0x6,
+	HTT_TLV_T2H_MSG_TYPE_TX_COMPL_IND              = 0x7,
+	HTT_TLV_T2H_MSG_TYPE_PKTLOG                    = 0x8,
+	HTT_TLV_T2H_MSG_TYPE_STATS_CONF                = 0x9,
+	HTT_TLV_T2H_MSG_TYPE_RX_FRAG_IND               = 0xa,
+	HTT_TLV_T2H_MSG_TYPE_SEC_IND                   = 0xb,
+	HTT_TLV_T2H_MSG_TYPE_RC_UPDATE_IND             = 0xc, /* deprecated */
+	HTT_TLV_T2H_MSG_TYPE_TX_INSPECT_IND            = 0xd,
+	HTT_TLV_T2H_MSG_TYPE_MGMT_TX_COMPL_IND         = 0xe,
+	HTT_TLV_T2H_MSG_TYPE_TX_CREDIT_UPDATE_IND      = 0xf,
+	HTT_TLV_T2H_MSG_TYPE_RX_PN_IND                 = 0x10,
+	HTT_TLV_T2H_MSG_TYPE_RX_OFFLOAD_DELIVER_IND    = 0x11,
+	HTT_TLV_T2H_MSG_TYPE_RX_IN_ORD_PADDR_IND       = 0x12,
+	/* 0x13 reservd */
+	HTT_TLV_T2H_MSG_TYPE_WDI_IPA_OP_RESPONSE       = 0x14,
+	HTT_TLV_T2H_MSG_TYPE_CHAN_CHANGE               = 0x15,
+	HTT_TLV_T2H_MSG_TYPE_RX_OFLD_PKT_ERR           = 0x16,
+	HTT_TLV_T2H_MSG_TYPE_TEST,
+	/* keep this last */
+	HTT_TLV_T2H_NUM_MSGS
+};
+
 enum htt_t2h_msg_type {
-	HTT_T2H_MSG_TYPE_VERSION_CONF		= 0x0,
-	HTT_T2H_MSG_TYPE_RX_IND			= 0x1,
-	HTT_T2H_MSG_TYPE_RX_FLUSH		= 0x2,
-	HTT_T2H_MSG_TYPE_PEER_MAP		= 0x3,
-	HTT_T2H_MSG_TYPE_PEER_UNMAP		= 0x4,
-	HTT_T2H_MSG_TYPE_RX_ADDBA		= 0x5,
-	HTT_T2H_MSG_TYPE_RX_DELBA		= 0x6,
-	HTT_T2H_MSG_TYPE_TX_COMPL_IND		= 0x7,
-	HTT_T2H_MSG_TYPE_PKTLOG			= 0x8,
-	HTT_T2H_MSG_TYPE_STATS_CONF		= 0x9,
-	HTT_T2H_MSG_TYPE_RX_FRAG_IND		= 0xa,
-	HTT_T2H_MSG_TYPE_SEC_IND		= 0xb,
-	HTT_T2H_MSG_TYPE_RC_UPDATE_IND		= 0xc,
-	HTT_T2H_MSG_TYPE_TX_INSPECT_IND		= 0xd,
-	HTT_T2H_MSG_TYPE_MGMT_TX_COMPLETION	= 0xe,
+	HTT_T2H_MSG_TYPE_VERSION_CONF,
+	HTT_T2H_MSG_TYPE_RX_IND,
+	HTT_T2H_MSG_TYPE_RX_FLUSH,
+	HTT_T2H_MSG_TYPE_PEER_MAP,
+	HTT_T2H_MSG_TYPE_PEER_UNMAP,
+	HTT_T2H_MSG_TYPE_RX_ADDBA,
+	HTT_T2H_MSG_TYPE_RX_DELBA,
+	HTT_T2H_MSG_TYPE_TX_COMPL_IND,
+	HTT_T2H_MSG_TYPE_PKTLOG,
+	HTT_T2H_MSG_TYPE_STATS_CONF,
+	HTT_T2H_MSG_TYPE_RX_FRAG_IND,
+	HTT_T2H_MSG_TYPE_SEC_IND,
+	HTT_T2H_MSG_TYPE_RC_UPDATE_IND,
+	HTT_T2H_MSG_TYPE_TX_INSPECT_IND,
+	HTT_T2H_MSG_TYPE_MGMT_TX_COMPLETION,
+	HTT_T2H_MSG_TYPE_TX_CREDIT_UPDATE_IND,
+	HTT_T2H_MSG_TYPE_RX_PN_IND,
+	HTT_T2H_MSG_TYPE_RX_OFFLOAD_DELIVER_IND,
+	HTT_T2H_MSG_TYPE_RX_IN_ORD_PADDR_IND,
+	HTT_T2H_MSG_TYPE_WDI_IPA_OP_RESPONSE,
+	HTT_T2H_MSG_TYPE_CHAN_CHANGE,
+	HTT_T2H_MSG_TYPE_RX_OFLD_PKT_ERR,
+	HTT_T2H_MSG_TYPE_AGGR_CONF,
+	HTT_T2H_MSG_TYPE_STATS_NOUPLOAD,
 	HTT_T2H_MSG_TYPE_TEST,
 	/* keep this last */
 	HTT_T2H_NUM_MSGS
@@ -654,6 +742,53 @@ struct htt_rx_fragment_indication {
 #define HTT_RX_FRAG_IND_INFO1_FLUSH_SEQ_NUM_START_LSB  0
 #define HTT_RX_FRAG_IND_INFO1_FLUSH_SEQ_NUM_END_MASK   0x00000FC0
 #define HTT_RX_FRAG_IND_INFO1_FLUSH_SEQ_NUM_END_LSB    6
+
+struct htt_rx_pn_ind {
+	__le16 peer_id;
+	u8 tid;
+	u8 seqno_start;
+	u8 seqno_end;
+	u8 pn_ie_count;
+	u8 reserved;
+	u8 pn_ies[0];
+} __packed;
+
+struct htt_rx_offload_msdu {
+	__le16 msdu_len;
+	__le16 peer_id;
+	u8 vdev_id;
+	u8 tid;
+	u8 fw_desc;
+	u8 payload[0];
+} __packed;
+
+struct htt_rx_offload_ind {
+	u8 reserved;
+	__le16 msdu_count;
+} __packed;
+
+struct htt_rx_in_ord_msdu_desc {
+	__le32 msdu_paddr;
+	__le16 msdu_len;
+	u8 fw_desc;
+	u8 reserved;
+} __packed;
+
+struct htt_rx_in_ord_ind {
+	u8 info;
+	__le16 peer_id;
+	u8 vdev_id;
+	u8 reserved;
+	__le16 msdu_count;
+	struct htt_rx_in_ord_msdu_desc msdu_descs[0];
+} __packed;
+
+#define HTT_RX_IN_ORD_IND_INFO_TID_MASK		0x0000001f
+#define HTT_RX_IN_ORD_IND_INFO_TID_LSB		0
+#define HTT_RX_IN_ORD_IND_INFO_OFFLOAD_MASK	0x00000020
+#define HTT_RX_IN_ORD_IND_INFO_OFFLOAD_LSB	5
+#define HTT_RX_IN_ORD_IND_INFO_FRAG_MASK	0x00000040
+#define HTT_RX_IN_ORD_IND_INFO_FRAG_LSB		6
 
 /*
  * target -> host test message definition
@@ -1150,6 +1285,9 @@ struct htt_resp {
 		struct htt_rx_test rx_test;
 		struct htt_pktlog_msg pktlog_msg;
 		struct htt_stats_conf stats_conf;
+		struct htt_rx_pn_ind rx_pn_ind;
+		struct htt_rx_offload_ind rx_offload_ind;
+		struct htt_rx_in_ord_ind rx_in_ord_ind;
 	};
 } __packed;
 
@@ -1159,6 +1297,7 @@ struct htt_tx_done {
 	u32 msdu_id;
 	bool discard;
 	bool no_ack;
+	bool success;
 };
 
 struct htt_peer_map_event {
@@ -1182,10 +1321,13 @@ struct ath10k_htt {
 	struct ath10k *ar;
 	enum ath10k_htc_ep_id eid;
 
-	int max_throughput_mbps;
 	u8 target_version_major;
 	u8 target_version_minor;
 	struct completion target_version_received;
+	enum ath10k_fw_htt_op_version op_version;
+
+	const enum htt_t2h_msg_type *t2h_msg_types;
+	u32 t2h_msg_types_max;
 
 	struct {
 		/*
@@ -1198,6 +1340,20 @@ struct ath10k_htt {
 		 * filled.
 		 */
 		struct sk_buff **netbufs_ring;
+
+		/* This is used only with firmware supporting IN_ORD_IND.
+		 *
+		 * With Full Rx Reorder the HTT Rx Ring is more of a temporary
+		 * buffer ring from which buffer addresses are copied by the
+		 * firmware to MAC Rx ring. Firmware then delivers IN_ORD_IND
+		 * pointing to specific (re-ordered) buffers.
+		 *
+		 * FIXME: With kernel generic hashing functions there's a lot
+		 * of hash collisions for sk_buffs.
+		 */
+		bool in_ord_rx;
+		DECLARE_HASHTABLE(skb_table, 4);
+
 		/*
 		 * Ring of buffer addresses -
 		 * This ring holds the "physical" device address of the
@@ -1252,12 +1408,11 @@ struct ath10k_htt {
 
 	unsigned int prefetch_len;
 
-	/* Protects access to %pending_tx, %used_msdu_ids */
+	/* Protects access to pending_tx, num_pending_tx */
 	spinlock_t tx_lock;
 	int max_num_pending_tx;
 	int num_pending_tx;
-	struct sk_buff **pending_tx;
-	unsigned long *used_msdu_ids; /* bitmap */
+	struct idr pending_tx;
 	wait_queue_head_t empty_tx_wq;
 	struct dma_pool *tx_pool;
 
@@ -1271,6 +1426,7 @@ struct ath10k_htt {
 	struct tasklet_struct txrx_compl_task;
 	struct sk_buff_head tx_compl_q;
 	struct sk_buff_head rx_compl_q;
+	struct sk_buff_head rx_in_ord_compl_q;
 
 	/* rx_status template */
 	struct ieee80211_rx_status rx_status;
@@ -1334,6 +1490,7 @@ int ath10k_htt_tx_alloc(struct ath10k_htt *htt);
 void ath10k_htt_tx_free(struct ath10k_htt *htt);
 
 int ath10k_htt_rx_alloc(struct ath10k_htt *htt);
+int ath10k_htt_rx_ring_refill(struct ath10k *ar);
 void ath10k_htt_rx_free(struct ath10k_htt *htt);
 
 void ath10k_htt_htc_tx_complete(struct ath10k *ar, struct sk_buff *skb);
@@ -1346,7 +1503,7 @@ int ath10k_htt_h2t_aggr_cfg_msg(struct ath10k_htt *htt,
 				u8 max_subfrms_amsdu);
 
 void __ath10k_htt_tx_dec_pending(struct ath10k_htt *htt);
-int ath10k_htt_tx_alloc_msdu_id(struct ath10k_htt *htt);
+int ath10k_htt_tx_alloc_msdu_id(struct ath10k_htt *htt, struct sk_buff *skb);
 void ath10k_htt_tx_free_msdu_id(struct ath10k_htt *htt, u16 msdu_id);
 int ath10k_htt_mgmt_tx(struct ath10k_htt *htt, struct sk_buff *);
 int ath10k_htt_tx(struct ath10k_htt *htt, struct sk_buff *);

@@ -358,7 +358,15 @@ static int ethtool_get_settings(struct net_device *dev, void __user *useraddr)
 	int err;
 	struct ethtool_cmd cmd;
 
-	err = __ethtool_get_settings(dev, &cmd);
+	if (!dev->ethtool_ops->get_settings)
+		return -EOPNOTSUPP;
+
+	if (copy_from_user(&cmd, useraddr, sizeof(cmd)))
+		return -EFAULT;
+
+	cmd.cmd = ETHTOOL_GSET;
+
+	err = dev->ethtool_ops->get_settings(dev, &cmd);
 	if (err < 0)
 		return err;
 
@@ -789,7 +797,7 @@ static noinline_for_stack int ethtool_set_rxfh(struct net_device *dev,
 	if (ops->get_rxfh_indir_size)
 		dev_indir_size = ops->get_rxfh_indir_size(dev);
 	if (ops->get_rxfh_key_size)
-		dev_key_size = dev->ethtool_ops->get_rxfh_key_size(dev);
+		dev_key_size = ops->get_rxfh_key_size(dev);
 
 	if (copy_from_user(&rxfh, useraddr, sizeof(rxfh)))
 		return -EFAULT;
@@ -1597,20 +1605,31 @@ static int ethtool_get_ts_info(struct net_device *dev, void __user *useraddr)
 	return err;
 }
 
+static int __ethtool_get_module_info(struct net_device *dev,
+				     struct ethtool_modinfo *modinfo)
+{
+	const struct ethtool_ops *ops = dev->ethtool_ops;
+	struct phy_device *phydev = dev->phydev;
+
+	if (phydev && phydev->drv && phydev->drv->module_info)
+		return phydev->drv->module_info(phydev, modinfo);
+
+	if (ops->get_module_info)
+		return ops->get_module_info(dev, modinfo);
+
+	return -EOPNOTSUPP;
+}
+
 static int ethtool_get_module_info(struct net_device *dev,
 				   void __user *useraddr)
 {
 	int ret;
 	struct ethtool_modinfo modinfo;
-	const struct ethtool_ops *ops = dev->ethtool_ops;
-
-	if (!ops->get_module_info)
-		return -EOPNOTSUPP;
 
 	if (copy_from_user(&modinfo, useraddr, sizeof(modinfo)))
 		return -EFAULT;
 
-	ret = ops->get_module_info(dev, &modinfo);
+	ret = __ethtool_get_module_info(dev, &modinfo);
 	if (ret)
 		return ret;
 
@@ -1620,21 +1639,33 @@ static int ethtool_get_module_info(struct net_device *dev,
 	return 0;
 }
 
+static int __ethtool_get_module_eeprom(struct net_device *dev,
+				       struct ethtool_eeprom *ee, u8 *data)
+{
+	const struct ethtool_ops *ops = dev->ethtool_ops;
+	struct phy_device *phydev = dev->phydev;
+
+	if (phydev && phydev->drv && phydev->drv->module_eeprom)
+		return phydev->drv->module_eeprom(phydev, ee, data);
+
+	if (ops->get_module_eeprom)
+		return ops->get_module_eeprom(dev, ee, data);
+
+	return -EOPNOTSUPP;
+}
+
 static int ethtool_get_module_eeprom(struct net_device *dev,
 				     void __user *useraddr)
 {
 	int ret;
 	struct ethtool_modinfo modinfo;
-	const struct ethtool_ops *ops = dev->ethtool_ops;
 
-	if (!ops->get_module_info || !ops->get_module_eeprom)
-		return -EOPNOTSUPP;
-
-	ret = ops->get_module_info(dev, &modinfo);
+	ret = __ethtool_get_module_info(dev, &modinfo);
 	if (ret)
 		return ret;
 
-	return ethtool_get_any_eeprom(dev, useraddr, ops->get_module_eeprom,
+	return ethtool_get_any_eeprom(dev, useraddr,
+				      __ethtool_get_module_eeprom,
 				      modinfo.eeprom_len);
 }
 

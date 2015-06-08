@@ -31,8 +31,6 @@
 #include <linux/micrel_phy.h>
 #include <linux/mfd/syscon.h>
 #include <linux/mfd/syscon/imx6q-iomuxc-gpr.h>
-#include <linux/fec.h>
-#include <linux/netdevice.h>
 #include <asm/mach/arch.h>
 #include <asm/mach/map.h>
 #include <asm/system_misc.h>
@@ -40,35 +38,6 @@
 #include "common.h"
 #include "cpuidle.h"
 #include "hardware.h"
-
-static struct fec_platform_data fec_pdata;
-
-static void imx6q_fec_sleep_enable(int enabled)
-{
-	struct regmap *gpr;
-
-	gpr = syscon_regmap_lookup_by_compatible("fsl,imx6q-iomuxc-gpr");
-	if (!IS_ERR(gpr)) {
-		if (enabled)
-			regmap_update_bits(gpr, IOMUXC_GPR13,
-					   IMX6Q_GPR13_ENET_STOP_REQ,
-					   IMX6Q_GPR13_ENET_STOP_REQ);
-
-		else
-			regmap_update_bits(gpr, IOMUXC_GPR13,
-					   IMX6Q_GPR13_ENET_STOP_REQ, 0);
-	} else
-		pr_err("failed to find fsl,imx6q-iomux-gpr regmap\n");
-}
-
-static void __init imx6q_enet_plt_init(void)
-{
-	struct device_node *np;
-
-	np = of_find_node_by_path("/soc/aips-bus@02100000/ethernet@02188000");
-	if (np && of_get_property(np, "fsl,magic-packet", NULL))
-		fec_pdata.sleep_mode_enable = imx6q_fec_sleep_enable;
-}
 
 /* For imx6q sabrelite board: set KSZ9021RN RGMII pad skew */
 static int ksz9021rn_phy_fixup(struct phy_device *phydev)
@@ -242,8 +211,9 @@ static void __init imx6q_1588_init(void)
 	 * set bit IOMUXC_GPR1[21].  Or the PTP clock must be from pad
 	 * (external OSC), and we need to clear the bit.
 	 */
-	clksel = ptp_clk == enet_ref ? IMX6Q_GPR1_ENET_CLK_SEL_ANATOP :
-				       IMX6Q_GPR1_ENET_CLK_SEL_PAD;
+	clksel = clk_is_match(ptp_clk, enet_ref) ?
+				IMX6Q_GPR1_ENET_CLK_SEL_ANATOP :
+				IMX6Q_GPR1_ENET_CLK_SEL_PAD;
 	gpr = syscon_regmap_lookup_by_compatible("fsl,imx6q-iomuxc-gpr");
 	if (!IS_ERR(gpr))
 		regmap_update_bits(gpr, IOMUXC_GPR1,
@@ -292,12 +262,6 @@ static void __init imx6q_axi_init(void)
 	}
 }
 
-/* Add auxdata to pass platform data */
-static const struct of_dev_auxdata imx6q_auxdata_lookup[] __initconst = {
-	OF_DEV_AUXDATA("fsl,imx6q-fec", 0x02188000, NULL, &fec_pdata),
-	{ /* sentinel */ }
-};
-
 static void __init imx6q_init_machine(void)
 {
 	struct device *parent;
@@ -311,13 +275,11 @@ static void __init imx6q_init_machine(void)
 
 	imx6q_enet_phy_init();
 
-	of_platform_populate(NULL, of_default_bus_match_table,
-			     imx6q_auxdata_lookup, parent);
+	of_platform_populate(NULL, of_default_bus_match_table, NULL, parent);
 
 	imx_anatop_init();
 	cpu_is_imx6q() ?  imx6q_pm_init() : imx6dl_pm_init();
 	imx6q_1588_init();
-	imx6q_enet_plt_init();
 	imx6q_axi_init();
 }
 
@@ -368,7 +330,7 @@ static void __init imx6q_opp_check_speed_grading(struct device *cpu_dev)
 			if (dev_pm_opp_disable(cpu_dev, 852000000))
 				pr_warn("failed to disable 852 MHz OPP\n");
 	}
-
+	iounmap(base);
 put_node:
 	of_node_put(np);
 }
@@ -426,10 +388,10 @@ static void __init imx6q_map_io(void)
 
 static void __init imx6q_init_irq(void)
 {
+	imx_gpc_check_dt();
 	imx_init_revision_from_anatop();
 	imx_init_l2cache();
 	imx_src_init();
-	imx_gpc_init();
 	irqchip_init();
 }
 

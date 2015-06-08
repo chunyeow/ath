@@ -170,6 +170,7 @@ struct rs_rate {
 	bool sgi;
 	bool ldpc;
 	bool stbc;
+	bool bfer;
 };
 
 
@@ -240,6 +241,13 @@ enum rs_column {
 	RS_COLUMN_INVALID,
 };
 
+enum rs_ss_force_opt {
+	RS_SS_FORCE_NONE = 0,
+	RS_SS_FORCE_STBC,
+	RS_SS_FORCE_BFER,
+	RS_SS_FORCE_SISO,
+};
+
 /* Packet stats per rate */
 struct rs_rate_stats {
 	u64 success;
@@ -293,7 +301,9 @@ struct iwl_lq_sta {
 	u64 last_tx;
 	bool is_vht;
 	bool ldpc;              /* LDPC Rx is supported by the STA */
-	bool stbc;              /* Tx STBC is supported by chip and Rx by STA */
+	bool stbc_capable;      /* Tx STBC is supported by chip and Rx by STA */
+	bool bfer_capable;      /* Remote supports beamformee and we BFer */
+
 	enum ieee80211_band band;
 
 	/* The following are bitmaps of rates; IWL_RATE_6M_MASK, etc. */
@@ -312,8 +322,6 @@ struct iwl_lq_sta {
 	struct iwl_scale_tbl_info lq_info[LQ_SIZE]; /* "active", "search" */
 	u8 tx_agg_tid_en;
 
-	/* used to be in sta_info */
-	int last_txrate_idx;
 	/* last tx rate_n_flags */
 	u32 last_rate_n_flags;
 	/* packets destined for this STA are aggregated */
@@ -327,6 +335,9 @@ struct iwl_lq_sta {
 #ifdef CONFIG_MAC80211_DEBUGFS
 		u32 dbg_fixed_rate;
 		u8 dbg_fixed_txp_reduction;
+
+		/* force STBC/BFER/SISO for testing */
+		enum rs_ss_force_opt ss_force;
 #endif
 		u8 chains;
 		s8 chain_signal[IEEE80211_MAX_CHAINS];

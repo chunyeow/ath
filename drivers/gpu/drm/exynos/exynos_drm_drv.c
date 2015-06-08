@@ -55,13 +55,11 @@ static int exynos_drm_load(struct drm_device *dev, unsigned long flags)
 {
 	struct exynos_drm_private *private;
 	int ret;
-	int nr;
 
 	private = kzalloc(sizeof(struct exynos_drm_private), GFP_KERNEL);
 	if (!private)
 		return -ENOMEM;
 
-	INIT_LIST_HEAD(&private->pageflip_event_list);
 	dev_set_drvdata(dev->dev, dev);
 	dev->dev_private = (void *)private;
 
@@ -80,19 +78,6 @@ static int exynos_drm_load(struct drm_device *dev, unsigned long flags)
 	drm_mode_config_init(dev);
 
 	exynos_drm_mode_config_init(dev);
-
-	for (nr = 0; nr < MAX_PLANE; nr++) {
-		struct drm_plane *plane;
-		unsigned long possible_crtcs = (1 << MAX_CRTC) - 1;
-
-		plane = exynos_plane_init(dev, possible_crtcs,
-					  DRM_PLANE_TYPE_OVERLAY);
-		if (!IS_ERR(plane))
-			continue;
-
-		ret = PTR_ERR(plane);
-		goto err_mode_config_cleanup;
-	}
 
 	/* setup possible_clones. */
 	exynos_drm_encoder_setup(dev);
@@ -237,25 +222,13 @@ static void exynos_drm_preclose(struct drm_device *dev,
 
 static void exynos_drm_postclose(struct drm_device *dev, struct drm_file *file)
 {
-	struct exynos_drm_private *private = dev->dev_private;
-	struct drm_pending_vblank_event *v, *vt;
 	struct drm_pending_event *e, *et;
 	unsigned long flags;
 
 	if (!file->driver_priv)
 		return;
 
-	/* Release all events not unhandled by page flip handler. */
 	spin_lock_irqsave(&dev->event_lock, flags);
-	list_for_each_entry_safe(v, vt, &private->pageflip_event_list,
-			base.link) {
-		if (v->base.file_priv == file) {
-			list_del(&v->base.link);
-			drm_vblank_put(dev, v->pipe);
-			v->base.destroy(&v->base);
-		}
-	}
-
 	/* Release all events handled by page flip handler but not freed. */
 	list_for_each_entry_safe(e, et, &file->event_list, link) {
 		list_del(&e->link);
@@ -556,6 +529,9 @@ static struct platform_driver *const exynos_drm_kms_drivers[] = {
 #ifdef CONFIG_DRM_EXYNOS_FIMD
 	&fimd_driver,
 #endif
+#ifdef CONFIG_DRM_EXYNOS7_DECON
+	&decon_driver,
+#endif
 #ifdef CONFIG_DRM_EXYNOS_DP
 	&dp_driver,
 #endif
@@ -612,6 +588,7 @@ static const char * const strings[] = {
 	"samsung,exynos3",
 	"samsung,exynos4",
 	"samsung,exynos5",
+	"samsung,exynos7",
 };
 
 static struct platform_driver exynos_drm_platform_driver = {
@@ -643,18 +620,6 @@ static int exynos_drm_init(void)
 	}
 
 	if (!is_exynos)
-		return -ENODEV;
-
-	/*
-	 * Register device object only in case of Exynos SoC.
-	 *
-	 * Below codes resolves temporarily infinite loop issue incurred
-	 * by Exynos drm driver when using multi-platform kernel.
-	 * So these codes will be replaced with more generic way later.
-	 */
-	if (!of_machine_is_compatible("samsung,exynos3") &&
-			!of_machine_is_compatible("samsung,exynos4") &&
-			!of_machine_is_compatible("samsung,exynos5"))
 		return -ENODEV;
 
 	exynos_drm_pdev = platform_device_register_simple("exynos-drm", -1,

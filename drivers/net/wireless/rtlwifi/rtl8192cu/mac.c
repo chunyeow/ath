@@ -497,7 +497,7 @@ int rtl92c_set_network_type(struct ieee80211_hw *hw, enum nl80211_iftype type)
 			 "Network type %d not supported!\n", type);
 		return -EOPNOTSUPP;
 	}
-	rtl_write_byte(rtlpriv, (REG_CR + 2), value);
+	rtl_write_byte(rtlpriv, MSR, value);
 	return 0;
 }
 
@@ -613,7 +613,7 @@ void rtl92c_init_ampdu_aggregation(struct ieee80211_hw *hw)
 	rtl_write_word(rtlpriv, 0x4CA, 0x0708);
 }
 
-void rtl92c_init_beacon_max_error(struct ieee80211_hw *hw, bool infra_mode)
+void rtl92c_init_beacon_max_error(struct ieee80211_hw *hw)
 {
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
 

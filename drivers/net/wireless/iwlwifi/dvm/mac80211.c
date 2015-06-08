@@ -1061,7 +1061,7 @@ static void iwlagn_configure_filter(struct ieee80211_hw *hw,
 	IWL_DEBUG_MAC80211(priv, "Enter: changed: 0x%x, total: 0x%x\n",
 			changed_flags, *total_flags);
 
-	CHK(FIF_OTHER_BSS | FIF_PROMISC_IN_BSS, RXON_FILTER_PROMISC_MSK);
+	CHK(FIF_OTHER_BSS, RXON_FILTER_PROMISC_MSK);
 	/* Setting _just_ RXON_FILTER_CTL2HOST_MSK causes FH errors */
 	CHK(FIF_CONTROL, RXON_FILTER_CTL2HOST_MSK | RXON_FILTER_PROMISC_MSK);
 	CHK(FIF_BCN_PRBRESP_PROMISC, RXON_FILTER_BCON_AWARE_MSK);
@@ -1088,7 +1088,7 @@ static void iwlagn_configure_filter(struct ieee80211_hw *hw,
 	 * since we currently do not support programming multicast
 	 * filters into the device.
 	 */
-	*total_flags &= FIF_OTHER_BSS | FIF_ALLMULTI | FIF_PROMISC_IN_BSS |
+	*total_flags &= FIF_OTHER_BSS | FIF_ALLMULTI |
 			FIF_BCN_PRBRESP_PROMISC | FIF_CONTROL;
 }
 
@@ -1114,44 +1114,46 @@ static void iwlagn_mac_flush(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
 	scd_queues &= ~(BIT(IWL_IPAN_CMD_QUEUE_NUM) |
 			BIT(IWL_DEFAULT_CMD_QUEUE_NUM));
 
-	if (vif)
-		scd_queues &= ~BIT(vif->hw_queue[IEEE80211_AC_VO]);
-
-	IWL_DEBUG_TX_QUEUES(priv, "Flushing SCD queues: 0x%x\n", scd_queues);
-	if (iwlagn_txfifo_flush(priv, scd_queues)) {
-		IWL_ERR(priv, "flush request fail\n");
-		goto done;
+	if (drop) {
+		IWL_DEBUG_TX_QUEUES(priv, "Flushing SCD queues: 0x%x\n",
+				    scd_queues);
+		if (iwlagn_txfifo_flush(priv, scd_queues)) {
+			IWL_ERR(priv, "flush request fail\n");
+			goto done;
+		}
 	}
+
 	IWL_DEBUG_TX_QUEUES(priv, "wait transmit/flush all frames\n");
-	iwl_trans_wait_tx_queue_empty(priv->trans, 0xffffffff);
+	iwl_trans_wait_tx_queue_empty(priv->trans, scd_queues);
 done:
 	mutex_unlock(&priv->mutex);
 	IWL_DEBUG_MAC80211(priv, "leave\n");
 }
 
-static void iwlagn_mac_rssi_callback(struct ieee80211_hw *hw,
-				     struct ieee80211_vif *vif,
-				     enum ieee80211_rssi_event rssi_event)
+static void iwlagn_mac_event_callback(struct ieee80211_hw *hw,
+				      struct ieee80211_vif *vif,
+				      const struct ieee80211_event *event)
 {
 	struct iwl_priv *priv = IWL_MAC80211_GET_DVM(hw);
 
+	if (event->type != RSSI_EVENT)
+		return;
+
 	IWL_DEBUG_MAC80211(priv, "enter\n");
-	mutex_lock(&priv->mutex);
 
 	if (priv->lib->bt_params &&
 	    priv->lib->bt_params->advanced_bt_coexist) {
-		if (rssi_event == RSSI_EVENT_LOW)
+		if (event->u.rssi.data == RSSI_EVENT_LOW)
 			priv->bt_enable_pspoll = true;
-		else if (rssi_event == RSSI_EVENT_HIGH)
+		else if (event->u.rssi.data == RSSI_EVENT_HIGH)
 			priv->bt_enable_pspoll = false;
 
-		iwlagn_send_advance_bt_config(priv);
+		queue_work(priv->workqueue, &priv->bt_runtime_config);
 	} else {
 		IWL_DEBUG_MAC80211(priv, "Advanced BT coex disabled,"
 				"ignoring RSSI callback\n");
 	}
 
-	mutex_unlock(&priv->mutex);
 	IWL_DEBUG_MAC80211(priv, "leave\n");
 }
 
@@ -1613,7 +1615,7 @@ const struct ieee80211_ops iwlagn_hw_ops = {
 	.channel_switch = iwlagn_mac_channel_switch,
 	.flush = iwlagn_mac_flush,
 	.tx_last_beacon = iwlagn_mac_tx_last_beacon,
-	.rssi_callback = iwlagn_mac_rssi_callback,
+	.event_callback = iwlagn_mac_event_callback,
 	.set_tim = iwlagn_mac_set_tim,
 };
 

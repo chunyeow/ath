@@ -17,6 +17,7 @@
 #include <linux/stmmac.h>
 #include <linux/phy.h>
 #include <linux/mfd/syscon.h>
+#include <linux/module.h>
 #include <linux/regmap.h>
 #include <linux/clk.h>
 #include <linux/of.h>
@@ -122,7 +123,7 @@ struct sti_dwmac {
 	bool ext_phyclk;	/* Clock from external PHY */
 	u32 tx_retime_src;	/* TXCLK Retiming*/
 	struct clk *clk;	/* PHY clock */
-	int ctrl_reg;		/* GMAC glue-logic control register */
+	u32 ctrl_reg;		/* GMAC glue-logic control register */
 	int clk_sel_reg;	/* GMAC ext clk selection register */
 	struct device *dev;
 	struct regmap *regmap;
@@ -285,11 +286,6 @@ static int sti_dwmac_parse_data(struct sti_dwmac *dwmac,
 	if (!np)
 		return -EINVAL;
 
-	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "sti-ethconf");
-	if (!res)
-		return -ENODATA;
-	dwmac->ctrl_reg = res->start;
-
 	/* clk selection from extra syscfg register */
 	dwmac->clk_sel_reg = -ENXIO;
 	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "sti-clkconf");
@@ -299,6 +295,12 @@ static int sti_dwmac_parse_data(struct sti_dwmac *dwmac,
 	regmap = syscon_regmap_lookup_by_phandle(np, "st,syscon");
 	if (IS_ERR(regmap))
 		return PTR_ERR(regmap);
+
+	err = of_property_read_u32_index(np, "st,syscon", 1, &dwmac->ctrl_reg);
+	if (err) {
+		dev_err(dev, "Can't get sysconfig ctrl offset (%d)\n", err);
+		return err;
+	}
 
 	dwmac->dev = dev;
 	dwmac->interface = of_get_phy_mode(np);
@@ -350,16 +352,40 @@ static void *sti_dwmac_setup(struct platform_device *pdev)
 	return dwmac;
 }
 
-const struct stmmac_of_data stih4xx_dwmac_data = {
+static const struct stmmac_of_data stih4xx_dwmac_data = {
 	.fix_mac_speed = stih4xx_fix_retime_src,
 	.setup = sti_dwmac_setup,
 	.init = stix4xx_init,
 	.exit = sti_dwmac_exit,
 };
 
-const struct stmmac_of_data stid127_dwmac_data = {
+static const struct stmmac_of_data stid127_dwmac_data = {
 	.fix_mac_speed = stid127_fix_retime_src,
 	.setup = sti_dwmac_setup,
 	.init = stid127_init,
 	.exit = sti_dwmac_exit,
 };
+
+static const struct of_device_id sti_dwmac_match[] = {
+	{ .compatible = "st,stih415-dwmac", .data = &stih4xx_dwmac_data},
+	{ .compatible = "st,stih416-dwmac", .data = &stih4xx_dwmac_data},
+	{ .compatible = "st,stid127-dwmac", .data = &stid127_dwmac_data},
+	{ .compatible = "st,stih407-dwmac", .data = &stih4xx_dwmac_data},
+	{ }
+};
+MODULE_DEVICE_TABLE(of, sti_dwmac_match);
+
+static struct platform_driver sti_dwmac_driver = {
+	.probe  = stmmac_pltfr_probe,
+	.remove = stmmac_pltfr_remove,
+	.driver = {
+		.name           = "sti-dwmac",
+		.pm		= &stmmac_pltfr_pm_ops,
+		.of_match_table = sti_dwmac_match,
+	},
+};
+module_platform_driver(sti_dwmac_driver);
+
+MODULE_AUTHOR("Srinivas Kandagatla <srinivas.kandagatla@st.com>");
+MODULE_DESCRIPTION("STMicroelectronics DWMAC Specific Glue layer");
+MODULE_LICENSE("GPL");

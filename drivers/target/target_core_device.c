@@ -33,6 +33,7 @@
 #include <linux/kthread.h>
 #include <linux/in.h>
 #include <linux/export.h>
+#include <asm/unaligned.h>
 #include <net/sock.h>
 #include <net/tcp.h>
 #include <scsi/scsi.h>
@@ -527,7 +528,7 @@ static void core_export_port(
 	list_add_tail(&port->sep_list, &dev->dev_sep_list);
 	spin_unlock(&dev->se_port_lock);
 
-	if (dev->transport->transport_type != TRANSPORT_PLUGIN_PHBA_PDEV &&
+	if (!(dev->transport->transport_flags & TRANSPORT_FLAG_PASSTHROUGH) &&
 	    !(dev->se_hba->hba_flags & HBA_FLAGS_INTERNAL_USE)) {
 		tg_pt_gp_mem = core_alua_allocate_tg_pt_gp_mem(port);
 		if (IS_ERR(tg_pt_gp_mem) || !tg_pt_gp_mem) {
@@ -650,6 +651,18 @@ static u32 se_dev_align_max_sectors(u32 max_sectors, u32 block_size)
 	return aligned_max_sectors;
 }
 
+bool se_dev_check_wce(struct se_device *dev)
+{
+	bool wce = false;
+
+	if (dev->transport->get_write_cache)
+		wce = dev->transport->get_write_cache(dev);
+	else if (dev->dev_attrib.emulate_write_cache > 0)
+		wce = true;
+
+	return wce;
+}
+
 int se_dev_set_max_unmap_lba_count(
 	struct se_device *dev,
 	u32 max_unmap_lba_count)
@@ -767,6 +780,16 @@ int se_dev_set_emulate_fua_write(struct se_device *dev, int flag)
 		pr_err("Illegal value %d\n", flag);
 		return -EINVAL;
 	}
+	if (flag &&
+	    dev->transport->get_write_cache) {
+		pr_warn("emulate_fua_write not supported for this device, ignoring\n");
+		return 0;
+	}
+	if (dev->export_count) {
+		pr_err("emulate_fua_write cannot be changed with active"
+		       " exports: %d\n", dev->export_count);
+		return -EINVAL;
+	}
 	dev->dev_attrib.emulate_fua_write = flag;
 	pr_debug("dev[%p]: SE Device Forced Unit Access WRITEs: %d\n",
 			dev, dev->dev_attrib.emulate_fua_write);
@@ -801,7 +824,11 @@ int se_dev_set_emulate_write_cache(struct se_device *dev, int flag)
 		pr_err("emulate_write_cache not supported for this device\n");
 		return -EINVAL;
 	}
-
+	if (dev->export_count) {
+		pr_err("emulate_write_cache cannot be changed with active"
+		       " exports: %d\n", dev->export_count);
+		return -EINVAL;
+	}
 	dev->dev_attrib.emulate_write_cache = flag;
 	pr_debug("dev[%p]: SE Device WRITE_CACHE_EMULATION flag: %d\n",
 			dev, dev->dev_attrib.emulate_write_cache);
@@ -1103,51 +1130,6 @@ int se_dev_set_queue_depth(struct se_device *dev, u32 queue_depth)
 }
 EXPORT_SYMBOL(se_dev_set_queue_depth);
 
-int se_dev_set_fabric_max_sectors(struct se_device *dev, u32 fabric_max_sectors)
-{
-	int block_size = dev->dev_attrib.block_size;
-
-	if (dev->export_count) {
-		pr_err("dev[%p]: Unable to change SE Device"
-			" fabric_max_sectors while export_count is %d\n",
-			dev, dev->export_count);
-		return -EINVAL;
-	}
-	if (!fabric_max_sectors) {
-		pr_err("dev[%p]: Illegal ZERO value for"
-			" fabric_max_sectors\n", dev);
-		return -EINVAL;
-	}
-	if (fabric_max_sectors < DA_STATUS_MAX_SECTORS_MIN) {
-		pr_err("dev[%p]: Passed fabric_max_sectors: %u less than"
-			" DA_STATUS_MAX_SECTORS_MIN: %u\n", dev, fabric_max_sectors,
-				DA_STATUS_MAX_SECTORS_MIN);
-		return -EINVAL;
-	}
-	if (fabric_max_sectors > DA_STATUS_MAX_SECTORS_MAX) {
-		pr_err("dev[%p]: Passed fabric_max_sectors: %u"
-			" greater than DA_STATUS_MAX_SECTORS_MAX:"
-			" %u\n", dev, fabric_max_sectors,
-			DA_STATUS_MAX_SECTORS_MAX);
-		return -EINVAL;
-	}
-	/*
-	 * Align max_sectors down to PAGE_SIZE to follow transport_allocate_data_tasks()
-	 */
-	if (!block_size) {
-		block_size = 512;
-		pr_warn("Defaulting to 512 for zero block_size\n");
-	}
-	fabric_max_sectors = se_dev_align_max_sectors(fabric_max_sectors,
-						      block_size);
-
-	dev->dev_attrib.fabric_max_sectors = fabric_max_sectors;
-	pr_debug("dev[%p]: SE Device max_sectors changed to %u\n",
-			dev, fabric_max_sectors);
-	return 0;
-}
-EXPORT_SYMBOL(se_dev_set_fabric_max_sectors);
-
 int se_dev_set_optimal_sectors(struct se_device *dev, u32 optimal_sectors)
 {
 	if (dev->export_count) {
@@ -1156,10 +1138,10 @@ int se_dev_set_optimal_sectors(struct se_device *dev, u32 optimal_sectors)
 			dev, dev->export_count);
 		return -EINVAL;
 	}
-	if (optimal_sectors > dev->dev_attrib.fabric_max_sectors) {
+	if (optimal_sectors > dev->dev_attrib.hw_max_sectors) {
 		pr_err("dev[%p]: Passed optimal_sectors %u cannot be"
-			" greater than fabric_max_sectors: %u\n", dev,
-			optimal_sectors, dev->dev_attrib.fabric_max_sectors);
+			" greater than hw_max_sectors: %u\n", dev,
+			optimal_sectors, dev->dev_attrib.hw_max_sectors);
 		return -EINVAL;
 	}
 
@@ -1553,8 +1535,6 @@ struct se_device *target_alloc_device(struct se_hba *hba, const char *name)
 	dev->dev_attrib.unmap_granularity_alignment =
 				DA_UNMAP_GRANULARITY_ALIGNMENT_DEFAULT;
 	dev->dev_attrib.max_write_same_len = DA_MAX_WRITE_SAME_LEN;
-	dev->dev_attrib.fabric_max_sectors = DA_FABRIC_MAX_SECTORS;
-	dev->dev_attrib.optimal_sectors = DA_FABRIC_MAX_SECTORS;
 
 	xcopy_lun = &dev->xcopy_lun;
 	xcopy_lun->lun_se_dev = dev;
@@ -1581,8 +1561,6 @@ int target_configure_device(struct se_device *dev)
 	ret = dev->transport->configure_device(dev);
 	if (ret)
 		goto out;
-	dev->dev_flags |= DF_CONFIGURED;
-
 	/*
 	 * XXX: there is not much point to have two different values here..
 	 */
@@ -1595,6 +1573,7 @@ int target_configure_device(struct se_device *dev)
 	dev->dev_attrib.hw_max_sectors =
 		se_dev_align_max_sectors(dev->dev_attrib.hw_max_sectors,
 					 dev->dev_attrib.hw_block_size);
+	dev->dev_attrib.optimal_sectors = dev->dev_attrib.hw_max_sectors;
 
 	dev->dev_index = scsi_get_new_index(SCSI_DEVICE_INDEX);
 	dev->creation_time = get_jiffies_64();
@@ -1625,7 +1604,7 @@ int target_configure_device(struct se_device *dev)
 	 * anything virtual (IBLOCK, FILEIO, RAMDISK), but not for TCM/pSCSI
 	 * passthrough because this is being provided by the backend LLD.
 	 */
-	if (dev->transport->transport_type != TRANSPORT_PLUGIN_PHBA_PDEV) {
+	if (!(dev->transport->transport_flags & TRANSPORT_FLAG_PASSTHROUGH)) {
 		strncpy(&dev->t10_wwn.vendor[0], "LIO-ORG", 8);
 		strncpy(&dev->t10_wwn.model[0],
 			dev->transport->inquiry_prod, 16);
@@ -1642,6 +1621,8 @@ int target_configure_device(struct se_device *dev)
 	mutex_lock(&g_device_mutex);
 	list_add_tail(&dev->g_dev_node, &g_device_list);
 	mutex_unlock(&g_device_mutex);
+
+	dev->dev_flags |= DF_CONFIGURED;
 
 	return 0;
 
@@ -1727,3 +1708,76 @@ void core_dev_release_virtual_lun0(void)
 		target_free_device(g_lun0_dev);
 	core_delete_hba(hba);
 }
+
+/*
+ * Common CDB parsing for kernel and user passthrough.
+ */
+sense_reason_t
+passthrough_parse_cdb(struct se_cmd *cmd,
+	sense_reason_t (*exec_cmd)(struct se_cmd *cmd))
+{
+	unsigned char *cdb = cmd->t_task_cdb;
+
+	/*
+	 * Clear a lun set in the cdb if the initiator talking to use spoke
+	 * and old standards version, as we can't assume the underlying device
+	 * won't choke up on it.
+	 */
+	switch (cdb[0]) {
+	case READ_10: /* SBC - RDProtect */
+	case READ_12: /* SBC - RDProtect */
+	case READ_16: /* SBC - RDProtect */
+	case SEND_DIAGNOSTIC: /* SPC - SELF-TEST Code */
+	case VERIFY: /* SBC - VRProtect */
+	case VERIFY_16: /* SBC - VRProtect */
+	case WRITE_VERIFY: /* SBC - VRProtect */
+	case WRITE_VERIFY_12: /* SBC - VRProtect */
+	case MAINTENANCE_IN: /* SPC - Parameter Data Format for SA RTPG */
+		break;
+	default:
+		cdb[1] &= 0x1f; /* clear logical unit number */
+		break;
+	}
+
+	/*
+	 * For REPORT LUNS we always need to emulate the response, for everything
+	 * else, pass it up.
+	 */
+	if (cdb[0] == REPORT_LUNS) {
+		cmd->execute_cmd = spc_emulate_report_luns;
+		return TCM_NO_SENSE;
+	}
+
+	/* Set DATA_CDB flag for ops that should have it */
+	switch (cdb[0]) {
+	case READ_6:
+	case READ_10:
+	case READ_12:
+	case READ_16:
+	case WRITE_6:
+	case WRITE_10:
+	case WRITE_12:
+	case WRITE_16:
+	case WRITE_VERIFY:
+	case WRITE_VERIFY_12:
+	case 0x8e: /* WRITE_VERIFY_16 */
+	case COMPARE_AND_WRITE:
+	case XDWRITEREAD_10:
+		cmd->se_cmd_flags |= SCF_SCSI_DATA_CDB;
+		break;
+	case VARIABLE_LENGTH_CMD:
+		switch (get_unaligned_be16(&cdb[8])) {
+		case READ_32:
+		case WRITE_32:
+		case 0x0c: /* WRITE_VERIFY_32 */
+		case XDWRITEREAD_32:
+			cmd->se_cmd_flags |= SCF_SCSI_DATA_CDB;
+			break;
+		}
+	}
+
+	cmd->execute_cmd = exec_cmd;
+
+	return TCM_NO_SENSE;
+}
+EXPORT_SYMBOL(passthrough_parse_cdb);

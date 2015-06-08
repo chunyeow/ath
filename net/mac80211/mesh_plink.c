@@ -17,7 +17,7 @@
 #define PLINK_GET_PLID(p) (p + 4)
 
 #define mod_plink_timer(s, t) (mod_timer(&s->plink_timer, \
-				jiffies + HZ * t / 1000))
+				jiffies + msecs_to_jiffies(t)))
 
 enum plink_event {
 	PLINK_UNDEFINED,
@@ -72,10 +72,11 @@ static bool rssi_threshold_check(struct ieee80211_sub_if_data *sdata,
  *
  * @sta: mesh peer link to restart
  *
- * Locking: this function must be called holding sta->lock
+ * Locking: this function must be called holding sta->plink_lock
  */
 static inline void mesh_plink_fsm_restart(struct sta_info *sta)
 {
+	lockdep_assert_held(&sta->plink_lock);
 	sta->plink_state = NL80211_PLINK_LISTEN;
 	sta->llid = sta->plid = sta->reason = 0;
 	sta->plink_retries = 0;
@@ -213,12 +214,14 @@ static u32 mesh_set_ht_prot_mode(struct ieee80211_sub_if_data *sdata)
  * All mesh paths with this peer as next hop will be flushed
  * Returns beacon changed flag if the beacon content changed.
  *
- * Locking: the caller must hold sta->lock
+ * Locking: the caller must hold sta->plink_lock
  */
 static u32 __mesh_plink_deactivate(struct sta_info *sta)
 {
 	struct ieee80211_sub_if_data *sdata = sta->sdata;
 	u32 changed = 0;
+
+	lockdep_assert_held(&sta->plink_lock);
 
 	if (sta->plink_state == NL80211_PLINK_ESTAB)
 		changed = mesh_plink_dec_estab_count(sdata);
@@ -244,13 +247,13 @@ u32 mesh_plink_deactivate(struct sta_info *sta)
 	struct ieee80211_sub_if_data *sdata = sta->sdata;
 	u32 changed;
 
-	spin_lock_bh(&sta->lock);
+	spin_lock_bh(&sta->plink_lock);
 	changed = __mesh_plink_deactivate(sta);
 	sta->reason = WLAN_REASON_MESH_PEER_CANCELED;
 	mesh_plink_frame_tx(sdata, WLAN_SP_MESH_PEERING_CLOSE,
 			    sta->sta.addr, sta->llid, sta->plid,
 			    sta->reason);
-	spin_unlock_bh(&sta->lock);
+	spin_unlock_bh(&sta->plink_lock);
 
 	return changed;
 }
@@ -382,11 +385,12 @@ static void mesh_sta_info_init(struct ieee80211_sub_if_data *sdata,
 	enum ieee80211_band band = ieee80211_get_sdata_band(sdata);
 	struct ieee80211_supported_band *sband;
 	u32 rates, basic_rates = 0, changed = 0;
+	enum ieee80211_sta_rx_bandwidth bw = sta->sta.bandwidth;
 
 	sband = local->hw.wiphy->bands[band];
 	rates = ieee80211_sta_get_rates(sdata, elems, band, &basic_rates);
 
-	spin_lock_bh(&sta->lock);
+	spin_lock_bh(&sta->plink_lock);
 	sta->last_rx = jiffies;
 
 	/* rates and capabilities don't change during peering */
@@ -399,6 +403,9 @@ static void mesh_sta_info_init(struct ieee80211_sub_if_data *sdata,
 
 	if (ieee80211_ht_cap_ie_to_sta_ht_cap(sdata, sband,
 					      elems->ht_cap_elem, sta))
+		changed |= IEEE80211_RC_BW_CHANGED;
+
+	if (bw != sta->sta.bandwidth)
 		changed |= IEEE80211_RC_BW_CHANGED;
 
 	/* HT peer is operating 20MHz-only */
@@ -415,7 +422,7 @@ static void mesh_sta_info_init(struct ieee80211_sub_if_data *sdata,
 	else
 		rate_control_rate_update(local, sband, sta, changed);
 out:
-	spin_unlock_bh(&sta->lock);
+	spin_unlock_bh(&sta->plink_lock);
 }
 
 static struct sta_info *
@@ -548,7 +555,7 @@ static void mesh_plink_timer(unsigned long data)
 	if (sta->sdata->local->quiescing)
 		return;
 
-	spin_lock_bh(&sta->lock);
+	spin_lock_bh(&sta->plink_lock);
 
 	/* If a timer fires just before a state transition on another CPU,
 	 * we may have already extended the timeout and changed state by the
@@ -559,7 +566,7 @@ static void mesh_plink_timer(unsigned long data)
 		mpl_dbg(sta->sdata,
 			"Ignoring timer for %pM in state %s (timer adjusted)",
 			sta->sta.addr, mplstates[sta->plink_state]);
-		spin_unlock_bh(&sta->lock);
+		spin_unlock_bh(&sta->plink_lock);
 		return;
 	}
 
@@ -569,7 +576,7 @@ static void mesh_plink_timer(unsigned long data)
 		mpl_dbg(sta->sdata,
 			"Ignoring timer for %pM in state %s (timer deleted)",
 			sta->sta.addr, mplstates[sta->plink_state]);
-		spin_unlock_bh(&sta->lock);
+		spin_unlock_bh(&sta->plink_lock);
 		return;
 	}
 
@@ -615,15 +622,15 @@ static void mesh_plink_timer(unsigned long data)
 	default:
 		break;
 	}
-	spin_unlock_bh(&sta->lock);
+	spin_unlock_bh(&sta->plink_lock);
 	if (action)
 		mesh_plink_frame_tx(sdata, action, sta->sta.addr,
 				    sta->llid, sta->plid, reason);
 }
 
-static inline void mesh_plink_timer_set(struct sta_info *sta, int timeout)
+static inline void mesh_plink_timer_set(struct sta_info *sta, u32 timeout)
 {
-	sta->plink_timer.expires = jiffies + (HZ * timeout / 1000);
+	sta->plink_timer.expires = jiffies + msecs_to_jiffies(timeout);
 	sta->plink_timer.data = (unsigned long) sta;
 	sta->plink_timer.function = mesh_plink_timer;
 	sta->plink_timeout = timeout;
@@ -670,16 +677,16 @@ u32 mesh_plink_open(struct sta_info *sta)
 	if (!test_sta_flag(sta, WLAN_STA_AUTH))
 		return 0;
 
-	spin_lock_bh(&sta->lock);
+	spin_lock_bh(&sta->plink_lock);
 	sta->llid = mesh_get_new_llid(sdata);
 	if (sta->plink_state != NL80211_PLINK_LISTEN &&
 	    sta->plink_state != NL80211_PLINK_BLOCKED) {
-		spin_unlock_bh(&sta->lock);
+		spin_unlock_bh(&sta->plink_lock);
 		return 0;
 	}
 	sta->plink_state = NL80211_PLINK_OPN_SNT;
 	mesh_plink_timer_set(sta, sdata->u.mesh.mshcfg.dot11MeshRetryTimeout);
-	spin_unlock_bh(&sta->lock);
+	spin_unlock_bh(&sta->plink_lock);
 	mpl_dbg(sdata,
 		"Mesh plink: starting establishment with %pM\n",
 		sta->sta.addr);
@@ -696,10 +703,10 @@ u32 mesh_plink_block(struct sta_info *sta)
 {
 	u32 changed;
 
-	spin_lock_bh(&sta->lock);
+	spin_lock_bh(&sta->plink_lock);
 	changed = __mesh_plink_deactivate(sta);
 	sta->plink_state = NL80211_PLINK_BLOCKED;
-	spin_unlock_bh(&sta->lock);
+	spin_unlock_bh(&sta->plink_lock);
 
 	return changed;
 }
@@ -754,7 +761,7 @@ static u32 mesh_plink_fsm(struct ieee80211_sub_if_data *sdata,
 	mpl_dbg(sdata, "peer %pM in state %s got event %s\n", sta->sta.addr,
 		mplstates[sta->plink_state], mplevents[event]);
 
-	spin_lock_bh(&sta->lock);
+	spin_lock_bh(&sta->plink_lock);
 	switch (sta->plink_state) {
 	case NL80211_PLINK_LISTEN:
 		switch (event) {
@@ -868,7 +875,7 @@ static u32 mesh_plink_fsm(struct ieee80211_sub_if_data *sdata,
 		 */
 		break;
 	}
-	spin_unlock_bh(&sta->lock);
+	spin_unlock_bh(&sta->plink_lock);
 	if (action) {
 		mesh_plink_frame_tx(sdata, action, sta->sta.addr,
 				    sta->llid, sta->plid, sta->reason);

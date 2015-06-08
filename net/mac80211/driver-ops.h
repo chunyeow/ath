@@ -417,12 +417,13 @@ static inline int drv_get_stats(struct ieee80211_local *local,
 	return ret;
 }
 
-static inline void drv_get_tkip_seq(struct ieee80211_local *local,
-				    u8 hw_key_idx, u32 *iv32, u16 *iv16)
+static inline void drv_get_key_seq(struct ieee80211_local *local,
+				   struct ieee80211_key *key,
+				   struct ieee80211_key_seq *seq)
 {
-	if (local->ops->get_tkip_seq)
-		local->ops->get_tkip_seq(&local->hw, hw_key_idx, iv32, iv16);
-	trace_drv_get_tkip_seq(local, hw_key_idx, iv32, iv16);
+	if (local->ops->get_key_seq)
+		local->ops->get_key_seq(&local->hw, &key->conf, seq);
+	trace_drv_get_key_seq(local, &key->conf);
 }
 
 static inline int drv_set_frag_threshold(struct ieee80211_local *local,
@@ -636,6 +637,21 @@ static inline void drv_sta_rate_tbl_update(struct ieee80211_local *local,
 	if (local->ops->sta_rate_tbl_update)
 		local->ops->sta_rate_tbl_update(&local->hw, &sdata->vif, sta);
 
+	trace_drv_return_void(local);
+}
+
+static inline void drv_sta_statistics(struct ieee80211_local *local,
+				      struct ieee80211_sub_if_data *sdata,
+				      struct ieee80211_sta *sta,
+				      struct station_info *sinfo)
+{
+	sdata = get_bss_sdata(sdata);
+	if (!check_sdata_in_driver(sdata))
+		return;
+
+	trace_drv_sta_statistics(local, sdata, sta);
+	if (local->ops->sta_statistics)
+		local->ops->sta_statistics(&local->hw, &sdata->vif, sta, sinfo);
 	trace_drv_return_void(local);
 }
 
@@ -926,13 +942,13 @@ static inline void drv_set_rekey_data(struct ieee80211_local *local,
 	trace_drv_return_void(local);
 }
 
-static inline void drv_rssi_callback(struct ieee80211_local *local,
-				     struct ieee80211_sub_if_data *sdata,
-				     const enum ieee80211_rssi_event event)
+static inline void drv_event_callback(struct ieee80211_local *local,
+				      struct ieee80211_sub_if_data *sdata,
+				      const struct ieee80211_event *event)
 {
-	trace_drv_rssi_callback(local, sdata, event);
-	if (local->ops->rssi_callback)
-		local->ops->rssi_callback(&local->hw, &sdata->vif, event);
+	trace_drv_event_callback(local, sdata, event);
+	if (local->ops->event_callback)
+		local->ops->event_callback(&local->hw, &sdata->vif, event);
 	trace_drv_return_void(local);
 }
 
@@ -964,21 +980,6 @@ drv_allow_buffered_frames(struct ieee80211_local *local,
 						  tids, num_frames, reason,
 						  more_data);
 	trace_drv_return_void(local);
-}
-
-static inline int drv_get_rssi(struct ieee80211_local *local,
-				struct ieee80211_sub_if_data *sdata,
-				struct ieee80211_sta *sta,
-				s8 *rssi_dbm)
-{
-	int ret;
-
-	might_sleep();
-
-	ret = local->ops->get_rssi(&local->hw, &sdata->vif, sta, rssi_dbm);
-	trace_drv_get_rssi(local, sta, *rssi_dbm, ret);
-
-	return ret;
 }
 
 static inline void drv_mgd_prepare_tx(struct ieee80211_local *local,
@@ -1365,6 +1366,18 @@ drv_tdls_recv_channel_switch(struct ieee80211_local *local,
 		local->ops->tdls_recv_channel_switch(&local->hw, &sdata->vif,
 						     params);
 	trace_drv_return_void(local);
+}
+
+static inline void drv_wake_tx_queue(struct ieee80211_local *local,
+				     struct txq_info *txq)
+{
+	struct ieee80211_sub_if_data *sdata = vif_to_sdata(txq->txq.vif);
+
+	if (!check_sdata_in_driver(sdata))
+		return;
+
+	trace_drv_wake_tx_queue(local, sdata, txq);
+	local->ops->wake_tx_queue(&local->hw, &txq->txq);
 }
 
 #endif /* __MAC80211_DRIVER_OPS */

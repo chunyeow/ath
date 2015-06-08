@@ -55,9 +55,6 @@ s32 ixgbe_get_invariants_X540(struct ixgbe_hw *hw)
 {
 	struct ixgbe_mac_info *mac = &hw->mac;
 
-	/* Call PHY identify routine to get the phy type */
-	ixgbe_identify_phy_generic(hw);
-
 	mac->mcft_size = IXGBE_X540_MC_TBL_SIZE;
 	mac->vft_size = IXGBE_X540_VFT_TBL_SIZE;
 	mac->num_rar_entries = IXGBE_X540_RAR_ENTRIES;
@@ -699,13 +696,13 @@ static void ixgbe_release_swfw_sync_semaphore(struct ixgbe_hw *hw)
 
 	/* Release both semaphores by writing 0 to the bits REGSMP and SMBI */
 
-	swsm = IXGBE_READ_REG(hw, IXGBE_SWSM);
-	swsm &= ~IXGBE_SWSM_SMBI;
-	IXGBE_WRITE_REG(hw, IXGBE_SWSM, swsm);
-
 	swsm = IXGBE_READ_REG(hw, IXGBE_SWFW_SYNC);
 	swsm &= ~IXGBE_SWFW_REGSMP;
 	IXGBE_WRITE_REG(hw, IXGBE_SWFW_SYNC, swsm);
+
+	swsm = IXGBE_READ_REG(hw, IXGBE_SWSM);
+	swsm &= ~IXGBE_SWSM_SMBI;
+	IXGBE_WRITE_REG(hw, IXGBE_SWSM, swsm);
 
 	IXGBE_WRITE_FLUSH(hw);
 }
@@ -823,6 +820,8 @@ static struct ixgbe_mac_operations mac_ops_X540 = {
 	.init_thermal_sensor_thresh = NULL,
 	.prot_autoc_read	= &prot_autoc_read_generic,
 	.prot_autoc_write	= &prot_autoc_write_generic,
+	.enable_rx		= &ixgbe_enable_rx_generic,
+	.disable_rx		= &ixgbe_disable_rx_generic,
 };
 
 static struct ixgbe_eeprom_operations eeprom_ops_X540 = {

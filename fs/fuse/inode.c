@@ -308,7 +308,6 @@ struct inode *fuse_iget(struct super_block *sb, u64 nodeid,
 		if (!fc->writeback_cache || !S_ISREG(attr->mode))
 			inode->i_flags |= S_NOCMTIME;
 		inode->i_generation = generation;
-		inode->i_data.backing_dev_info = &fc->bdi;
 		fuse_init_inode(inode, attr);
 		unlock_new_inode(inode);
 	} else if ((inode->i_mode ^ attr->mode) & S_IFMT) {
@@ -422,10 +421,9 @@ static int fuse_statfs(struct dentry *dentry, struct kstatfs *buf)
 	memset(&outarg, 0, sizeof(outarg));
 	args.in.numargs = 0;
 	args.in.h.opcode = FUSE_STATFS;
-	args.in.h.nodeid = get_node_id(dentry->d_inode);
+	args.in.h.nodeid = get_node_id(d_inode(dentry));
 	args.out.numargs = 1;
-	args.out.args[0].size =
-		fc->minor < 4 ? FUSE_COMPAT_STATFS_SIZE : sizeof(outarg);
+	args.out.args[0].size = sizeof(outarg);
 	args.out.args[0].value = &outarg;
 	err = fuse_simple_request(fc, &args);
 	if (!err)
@@ -742,7 +740,7 @@ static struct dentry *fuse_fh_to_parent(struct super_block *sb,
 
 static struct dentry *fuse_get_parent(struct dentry *child)
 {
-	struct inode *child_inode = child->d_inode;
+	struct inode *child_inode = d_inode(child);
 	struct fuse_conn *fc = get_fuse_conn(child_inode);
 	struct inode *inode;
 	struct dentry *parent;
@@ -898,7 +896,7 @@ static void process_init_reply(struct fuse_conn *fc, struct fuse_req *req)
 		fc->max_write = max_t(unsigned, 4096, fc->max_write);
 		fc->conn_init = 1;
 	}
-	fc->initialized = 1;
+	fuse_set_initialized(fc);
 	wake_up_all(&fc->blocked_waitq);
 }
 

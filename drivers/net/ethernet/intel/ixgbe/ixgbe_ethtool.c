@@ -1351,7 +1351,7 @@ static bool reg_pattern_test(struct ixgbe_adapter *adapter, u64 *data, int reg,
 
 	if (ixgbe_removed(adapter->hw.hw_addr)) {
 		*data = 1;
-		return 1;
+		return true;
 	}
 	for (pat = 0; pat < ARRAY_SIZE(test_pattern); pat++) {
 		before = ixgbe_read_reg(&adapter->hw, reg);
@@ -1376,7 +1376,7 @@ static bool reg_set_and_check(struct ixgbe_adapter *adapter, u64 *data, int reg,
 
 	if (ixgbe_removed(adapter->hw.hw_addr)) {
 		*data = 1;
-		return 1;
+		return true;
 	}
 	before = ixgbe_read_reg(&adapter->hw, reg);
 	ixgbe_write_reg(&adapter->hw, reg, write & mask);
@@ -1637,9 +1637,7 @@ static void ixgbe_free_desc_rings(struct ixgbe_adapter *adapter)
 	/* shut down the DMA engines now so they can be reinitialized later */
 
 	/* first Rx */
-	reg_ctl = IXGBE_READ_REG(hw, IXGBE_RXCTRL);
-	reg_ctl &= ~IXGBE_RXCTRL_RXEN;
-	IXGBE_WRITE_REG(hw, IXGBE_RXCTRL, reg_ctl);
+	hw->mac.ops.disable_rx(hw);
 	ixgbe_disable_rx_queue(adapter, rx_ring);
 
 	/* now Tx */
@@ -1670,6 +1668,7 @@ static int ixgbe_setup_desc_rings(struct ixgbe_adapter *adapter)
 {
 	struct ixgbe_ring *tx_ring = &adapter->test_tx_ring;
 	struct ixgbe_ring *rx_ring = &adapter->test_rx_ring;
+	struct ixgbe_hw *hw = &adapter->hw;
 	u32 rctl, reg_data;
 	int ret_val;
 	int err;
@@ -1713,13 +1712,15 @@ static int ixgbe_setup_desc_rings(struct ixgbe_adapter *adapter)
 		goto err_nomem;
 	}
 
-	rctl = IXGBE_READ_REG(&adapter->hw, IXGBE_RXCTRL);
-	IXGBE_WRITE_REG(&adapter->hw, IXGBE_RXCTRL, rctl & ~IXGBE_RXCTRL_RXEN);
+	hw->mac.ops.disable_rx(hw);
 
 	ixgbe_configure_rx_ring(adapter, rx_ring);
 
-	rctl |= IXGBE_RXCTRL_RXEN | IXGBE_RXCTRL_DMBYPS;
+	rctl = IXGBE_READ_REG(&adapter->hw, IXGBE_RXCTRL);
+	rctl |= IXGBE_RXCTRL_DMBYPS;
 	IXGBE_WRITE_REG(&adapter->hw, IXGBE_RXCTRL, rctl);
+
+	hw->mac.ops.enable_rx(hw);
 
 	return 0;
 
@@ -2852,6 +2853,45 @@ static int ixgbe_set_rxnfc(struct net_device *dev, struct ethtool_rxnfc *cmd)
 	return ret;
 }
 
+static u32 ixgbe_get_rxfh_key_size(struct net_device *netdev)
+{
+	struct ixgbe_adapter *adapter = netdev_priv(netdev);
+
+	return sizeof(adapter->rss_key);
+}
+
+static u32 ixgbe_rss_indir_size(struct net_device *netdev)
+{
+	struct ixgbe_adapter *adapter = netdev_priv(netdev);
+
+	return ixgbe_rss_indir_tbl_entries(adapter);
+}
+
+static void ixgbe_get_reta(struct ixgbe_adapter *adapter, u32 *indir)
+{
+	int i, reta_size = ixgbe_rss_indir_tbl_entries(adapter);
+
+	for (i = 0; i < reta_size; i++)
+		indir[i] = adapter->rss_indir_tbl[i];
+}
+
+static int ixgbe_get_rxfh(struct net_device *netdev, u32 *indir, u8 *key,
+			  u8 *hfunc)
+{
+	struct ixgbe_adapter *adapter = netdev_priv(netdev);
+
+	if (hfunc)
+		*hfunc = ETH_RSS_HASH_TOP;
+
+	if (indir)
+		ixgbe_get_reta(adapter, indir);
+
+	if (key)
+		memcpy(key, adapter->rss_key, ixgbe_get_rxfh_key_size(netdev));
+
+	return 0;
+}
+
 static int ixgbe_get_ts_info(struct net_device *dev,
 			     struct ethtool_ts_info *info)
 {
@@ -3013,7 +3053,7 @@ static int ixgbe_get_module_info(struct net_device *dev,
 {
 	struct ixgbe_adapter *adapter = netdev_priv(dev);
 	struct ixgbe_hw *hw = &adapter->hw;
-	u32 status;
+	s32 status;
 	u8 sff8472_rev, addr_mode;
 	bool page_swap = false;
 
@@ -3021,14 +3061,14 @@ static int ixgbe_get_module_info(struct net_device *dev,
 	status = hw->phy.ops.read_i2c_eeprom(hw,
 					     IXGBE_SFF_SFF_8472_COMP,
 					     &sff8472_rev);
-	if (status != 0)
+	if (status)
 		return -EIO;
 
 	/* addressing mode is not supported */
 	status = hw->phy.ops.read_i2c_eeprom(hw,
 					     IXGBE_SFF_SFF_8472_SWAP,
 					     &addr_mode);
-	if (status != 0)
+	if (status)
 		return -EIO;
 
 	if (addr_mode & IXGBE_SFF_ADDRESSING_MODE) {
@@ -3055,7 +3095,7 @@ static int ixgbe_get_module_eeprom(struct net_device *dev,
 {
 	struct ixgbe_adapter *adapter = netdev_priv(dev);
 	struct ixgbe_hw *hw = &adapter->hw;
-	u32 status = IXGBE_ERR_PHY_ADDR_INVALID;
+	s32 status = IXGBE_ERR_PHY_ADDR_INVALID;
 	u8 databyte = 0xFF;
 	int i = 0;
 
@@ -3072,7 +3112,7 @@ static int ixgbe_get_module_eeprom(struct net_device *dev,
 		else
 			status = hw->phy.ops.read_i2c_sff8472(hw, i, &databyte);
 
-		if (status != 0)
+		if (status)
 			return -EIO;
 
 		data[i - ee->offset] = databyte;
@@ -3109,6 +3149,9 @@ static const struct ethtool_ops ixgbe_ethtool_ops = {
 	.set_coalesce           = ixgbe_set_coalesce,
 	.get_rxnfc		= ixgbe_get_rxnfc,
 	.set_rxnfc		= ixgbe_set_rxnfc,
+	.get_rxfh_indir_size	= ixgbe_rss_indir_size,
+	.get_rxfh_key_size	= ixgbe_get_rxfh_key_size,
+	.get_rxfh		= ixgbe_get_rxfh,
 	.get_channels		= ixgbe_get_channels,
 	.set_channels		= ixgbe_set_channels,
 	.get_ts_info		= ixgbe_get_ts_info,

@@ -22,13 +22,14 @@
 
 static struct net_device *
 ieee802154_add_iface_deprecated(struct wpan_phy *wpan_phy,
-				const char *name, int type)
+				const char *name,
+				unsigned char name_assign_type, int type)
 {
 	struct ieee802154_local *local = wpan_phy_priv(wpan_phy);
 	struct net_device *dev;
 
 	rtnl_lock();
-	dev = ieee802154_if_add(local, name, type,
+	dev = ieee802154_if_add(local, name, name_assign_type, type,
 				cpu_to_le64(0x0000000000000000ULL));
 	rtnl_unlock();
 
@@ -45,16 +46,15 @@ static void ieee802154_del_iface_deprecated(struct wpan_phy *wpan_phy,
 
 static int
 ieee802154_add_iface(struct wpan_phy *phy, const char *name,
+		     unsigned char name_assign_type,
 		     enum nl802154_iftype type, __le64 extended_addr)
 {
 	struct ieee802154_local *local = wpan_phy_priv(phy);
 	struct net_device *err;
 
-	err = ieee802154_if_add(local, name, type, extended_addr);
-	if (IS_ERR(err))
-		return PTR_ERR(err);
-
-	return 0;
+	err = ieee802154_if_add(local, name, name_assign_type, type,
+				extended_addr);
+	return PTR_ERR_OR_ZERO(err);
 }
 
 static int

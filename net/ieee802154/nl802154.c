@@ -306,7 +306,8 @@ static int nl802154_send_wpan_phy(struct cfg802154_registered_device *rdev,
 		goto nla_put_failure;
 
 finish:
-	return genlmsg_end(msg, hdr);
+	genlmsg_end(msg, hdr);
+	return 0;
 
 nla_put_failure:
 	genlmsg_cancel(msg, hdr);
@@ -489,7 +490,8 @@ nl802154_send_iface(struct sk_buff *msg, u32 portid, u32 seq, int flags,
 	if (nla_put_u8(msg, NL802154_ATTR_LBT_MODE, wpan_dev->lbt))
 		goto nla_put_failure;
 
-	return genlmsg_end(msg, hdr);
+	genlmsg_end(msg, hdr);
+	return 0;
 
 nla_put_failure:
 	genlmsg_cancel(msg, hdr);
@@ -587,7 +589,7 @@ static int nl802154_new_interface(struct sk_buff *skb, struct genl_info *info)
 
 	return rdev_add_virtual_intf(rdev,
 				     nla_data(info->attrs[NL802154_ATTR_IFNAME]),
-				     type, extended_addr);
+				     NET_NAME_USER, type, extended_addr);
 }
 
 static int nl802154_del_interface(struct sk_buff *skb, struct genl_info *info)

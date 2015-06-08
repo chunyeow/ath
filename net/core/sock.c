@@ -325,6 +325,8 @@ __u32 sysctl_rmem_default __read_mostly = SK_RMEM_MAX;
 int sysctl_optmem_max __read_mostly = sizeof(unsigned long)*(2*UIO_MAXIOV+512);
 EXPORT_SYMBOL(sysctl_optmem_max);
 
+int sysctl_tstamp_allow_data __read_mostly = 1;
+
 struct static_key memalloc_socks = STATIC_KEY_INIT_FALSE;
 EXPORT_SYMBOL_GPL(memalloc_socks);
 
@@ -464,7 +466,7 @@ int sock_queue_rcv_skb(struct sock *sk, struct sk_buff *skb)
 	skb_dst_force(skb);
 
 	spin_lock_irqsave(&list->lock, flags);
-	skb->dropcount = atomic_read(&sk->sk_drops);
+	sock_skb_set_dropcount(sk, skb);
 	__skb_queue_tail(list, skb);
 	spin_unlock_irqrestore(&list->lock, flags);
 
@@ -650,6 +652,25 @@ static inline void sock_valbool_flag(struct sock *sk, int bit, int valbool)
 	else
 		sock_reset_flag(sk, bit);
 }
+
+bool sk_mc_loop(struct sock *sk)
+{
+	if (dev_recursion_level())
+		return false;
+	if (!sk)
+		return true;
+	switch (sk->sk_family) {
+	case AF_INET:
+		return inet_sk(sk)->mc_loop;
+#if IS_ENABLED(CONFIG_IPV6)
+	case AF_INET6:
+		return inet6_sk(sk)->mc_loop;
+#endif
+	}
+	WARN_ON(1);
+	return true;
+}
+EXPORT_SYMBOL(sk_mc_loop);
 
 /*
  *	This is meant for all protocols to use and covers goings on
@@ -840,6 +861,7 @@ set_rcvbuf:
 			ret = -EINVAL;
 			break;
 		}
+
 		if (val & SOF_TIMESTAMPING_OPT_ID &&
 		    !(sk->sk_tsflags & SOF_TIMESTAMPING_OPT_ID)) {
 			if (sk->sk_protocol == IPPROTO_TCP) {
@@ -925,8 +947,6 @@ set_rcvbuf:
 			sk->sk_mark = val;
 		break;
 
-		/* We implement the SO_SNDLOWAT etc to
-		   not be settable (1003.1g 5.3) */
 	case SO_RXQ_OVFL:
 		sock_valbool_flag(sk, SOCK_RXQ_OVFL, valbool);
 		break;
@@ -1231,6 +1251,9 @@ int sock_getsockopt(struct socket *sock, int level, int optname,
 		break;
 
 	default:
+		/* We implement the SO_SNDLOWAT etc to not be settable
+		 * (1003.1g 7).
+		 */
 		return -ENOPROTOOPT;
 	}
 
@@ -1373,9 +1396,10 @@ EXPORT_SYMBOL_GPL(sock_update_netprioidx);
  *	@family: protocol family
  *	@priority: for allocation (%GFP_KERNEL, %GFP_ATOMIC, etc)
  *	@prot: struct proto associated with this new sock instance
+ *	@kern: is this to be a kernel socket?
  */
 struct sock *sk_alloc(struct net *net, int family, gfp_t priority,
-		      struct proto *prot)
+		      struct proto *prot, int kern)
 {
 	struct sock *sk;
 
@@ -1388,7 +1412,10 @@ struct sock *sk_alloc(struct net *net, int family, gfp_t priority,
 		 */
 		sk->sk_prot = sk->sk_prot_creator = prot;
 		sock_lock_init(sk);
-		sock_net_set(sk, get_net(net));
+		sk->sk_net_refcnt = kern ? 0 : 1;
+		if (likely(sk->sk_net_refcnt))
+			get_net(net);
+		sock_net_set(sk, net);
 		atomic_set(&sk->sk_wmem_alloc, 1);
 
 		sock_update_classid(sk);
@@ -1422,7 +1449,8 @@ static void __sk_free(struct sock *sk)
 	if (sk->sk_peer_cred)
 		put_cred(sk->sk_peer_cred);
 	put_pid(sk->sk_peer_pid);
-	put_net(sock_net(sk));
+	if (likely(sk->sk_net_refcnt))
+		put_net(sock_net(sk));
 	sk_prot_free(sk->sk_prot_creator, sk);
 }
 
@@ -1437,26 +1465,6 @@ void sk_free(struct sock *sk)
 		__sk_free(sk);
 }
 EXPORT_SYMBOL(sk_free);
-
-/*
- * Last sock_put should drop reference to sk->sk_net. It has already
- * been dropped in sk_change_net. Taking reference to stopping namespace
- * is not an option.
- * Take reference to a socket to remove it from hash _alive_ and after that
- * destroy it in the context of init_net.
- */
-void sk_release_kernel(struct sock *sk)
-{
-	if (sk == NULL || sk->sk_socket == NULL)
-		return;
-
-	sock_hold(sk);
-	sock_release(sk->sk_socket);
-	release_net(sock_net(sk));
-	sock_net_set(sk, get_net(&init_net));
-	sock_put(sk);
-}
-EXPORT_SYMBOL(sk_release_kernel);
 
 static void sk_update_clone(const struct sock *sk, struct sock *newsk)
 {
@@ -1535,6 +1543,7 @@ struct sock *sk_clone_lock(const struct sock *sk, const gfp_t priority)
 		newsk->sk_err	   = 0;
 		newsk->sk_priority = 0;
 		newsk->sk_incoming_cpu = raw_smp_processor_id();
+		atomic64_set(&newsk->sk_cookie, 0);
 		/*
 		 * Before updating sk_refcnt, we must commit prior changes to memory
 		 * (Documentation/RCU/rculist_nulls.txt for details)
@@ -1652,24 +1661,15 @@ void sock_rfree(struct sk_buff *skb)
 }
 EXPORT_SYMBOL(sock_rfree);
 
+/*
+ * Buffer destructor for skbs that are not used directly in read or write
+ * path, e.g. for error handler skbs. Automatically called from kfree_skb.
+ */
 void sock_efree(struct sk_buff *skb)
 {
 	sock_put(skb->sk);
 }
 EXPORT_SYMBOL(sock_efree);
-
-#ifdef CONFIG_INET
-void sock_edemux(struct sk_buff *skb)
-{
-	struct sock *sk = skb->sk;
-
-	if (sk->sk_state == TCP_TIME_WAIT)
-		inet_twsk_put(inet_twsk(sk));
-	else
-		sock_put(sk);
-}
-EXPORT_SYMBOL(sock_edemux);
-#endif
 
 kuid_t sock_i_uid(struct sock *sk)
 {
@@ -2069,12 +2069,13 @@ EXPORT_SYMBOL(__sk_mem_schedule);
 /**
  *	__sk_reclaim - reclaim memory_allocated
  *	@sk: socket
+ *	@amount: number of bytes (rounded down to a SK_MEM_QUANTUM multiple)
  */
-void __sk_mem_reclaim(struct sock *sk)
+void __sk_mem_reclaim(struct sock *sk, int amount)
 {
-	sk_memory_allocated_sub(sk,
-				sk->sk_forward_alloc >> SK_MEM_QUANTUM_SHIFT);
-	sk->sk_forward_alloc &= SK_MEM_QUANTUM - 1;
+	amount >>= SK_MEM_QUANTUM_SHIFT;
+	sk_memory_allocated_sub(sk, amount);
+	sk->sk_forward_alloc -= amount << SK_MEM_QUANTUM_SHIFT;
 
 	if (sk_under_memory_pressure(sk) &&
 	    (sk_memory_allocated(sk) < sk_prot_mem_limits(sk, 0)))
@@ -2160,15 +2161,14 @@ int sock_no_getsockopt(struct socket *sock, int level, int optname,
 }
 EXPORT_SYMBOL(sock_no_getsockopt);
 
-int sock_no_sendmsg(struct kiocb *iocb, struct socket *sock, struct msghdr *m,
-		    size_t len)
+int sock_no_sendmsg(struct socket *sock, struct msghdr *m, size_t len)
 {
 	return -EOPNOTSUPP;
 }
 EXPORT_SYMBOL(sock_no_sendmsg);
 
-int sock_no_recvmsg(struct kiocb *iocb, struct socket *sock, struct msghdr *m,
-		    size_t len, int flags)
+int sock_no_recvmsg(struct socket *sock, struct msghdr *m, size_t len,
+		    int flags)
 {
 	return -EOPNOTSUPP;
 }
@@ -2540,14 +2540,14 @@ int compat_sock_common_getsockopt(struct socket *sock, int level, int optname,
 EXPORT_SYMBOL(compat_sock_common_getsockopt);
 #endif
 
-int sock_common_recvmsg(struct kiocb *iocb, struct socket *sock,
-			struct msghdr *msg, size_t size, int flags)
+int sock_common_recvmsg(struct socket *sock, struct msghdr *msg, size_t size,
+			int flags)
 {
 	struct sock *sk = sock->sk;
 	int addr_len = 0;
 	int err;
 
-	err = sk->sk_prot->recvmsg(iocb, sk, msg, size, flags & MSG_DONTWAIT,
+	err = sk->sk_prot->recvmsg(sk, msg, size, flags & MSG_DONTWAIT,
 				   flags & ~MSG_DONTWAIT, &addr_len);
 	if (err >= 0)
 		msg->msg_namelen = addr_len;
@@ -2724,6 +2724,42 @@ static inline void release_proto_idx(struct proto *prot)
 }
 #endif
 
+static void req_prot_cleanup(struct request_sock_ops *rsk_prot)
+{
+	if (!rsk_prot)
+		return;
+	kfree(rsk_prot->slab_name);
+	rsk_prot->slab_name = NULL;
+	if (rsk_prot->slab) {
+		kmem_cache_destroy(rsk_prot->slab);
+		rsk_prot->slab = NULL;
+	}
+}
+
+static int req_prot_init(const struct proto *prot)
+{
+	struct request_sock_ops *rsk_prot = prot->rsk_prot;
+
+	if (!rsk_prot)
+		return 0;
+
+	rsk_prot->slab_name = kasprintf(GFP_KERNEL, "request_sock_%s",
+					prot->name);
+	if (!rsk_prot->slab_name)
+		return -ENOMEM;
+
+	rsk_prot->slab = kmem_cache_create(rsk_prot->slab_name,
+					   rsk_prot->obj_size, 0,
+					   0, NULL);
+
+	if (!rsk_prot->slab) {
+		pr_crit("%s: Can't create request sock SLAB cache!\n",
+			prot->name);
+		return -ENOMEM;
+	}
+	return 0;
+}
+
 int proto_register(struct proto *prot, int alloc_slab)
 {
 	if (alloc_slab) {
@@ -2737,21 +2773,8 @@ int proto_register(struct proto *prot, int alloc_slab)
 			goto out;
 		}
 
-		if (prot->rsk_prot != NULL) {
-			prot->rsk_prot->slab_name = kasprintf(GFP_KERNEL, "request_sock_%s", prot->name);
-			if (prot->rsk_prot->slab_name == NULL)
-				goto out_free_sock_slab;
-
-			prot->rsk_prot->slab = kmem_cache_create(prot->rsk_prot->slab_name,
-								 prot->rsk_prot->obj_size, 0,
-								 SLAB_HWCACHE_ALIGN, NULL);
-
-			if (prot->rsk_prot->slab == NULL) {
-				pr_crit("%s: Can't create request sock SLAB cache!\n",
-					prot->name);
-				goto out_free_request_sock_slab_name;
-			}
-		}
+		if (req_prot_init(prot))
+			goto out_free_request_sock_slab;
 
 		if (prot->twsk_prot != NULL) {
 			prot->twsk_prot->twsk_slab_name = kasprintf(GFP_KERNEL, "tw_sock_%s", prot->name);
@@ -2763,8 +2786,7 @@ int proto_register(struct proto *prot, int alloc_slab)
 				kmem_cache_create(prot->twsk_prot->twsk_slab_name,
 						  prot->twsk_prot->twsk_obj_size,
 						  0,
-						  SLAB_HWCACHE_ALIGN |
-							prot->slab_flags,
+						  prot->slab_flags,
 						  NULL);
 			if (prot->twsk_prot->twsk_slab == NULL)
 				goto out_free_timewait_sock_slab_name;
@@ -2780,14 +2802,8 @@ int proto_register(struct proto *prot, int alloc_slab)
 out_free_timewait_sock_slab_name:
 	kfree(prot->twsk_prot->twsk_slab_name);
 out_free_request_sock_slab:
-	if (prot->rsk_prot && prot->rsk_prot->slab) {
-		kmem_cache_destroy(prot->rsk_prot->slab);
-		prot->rsk_prot->slab = NULL;
-	}
-out_free_request_sock_slab_name:
-	if (prot->rsk_prot)
-		kfree(prot->rsk_prot->slab_name);
-out_free_sock_slab:
+	req_prot_cleanup(prot->rsk_prot);
+
 	kmem_cache_destroy(prot->slab);
 	prot->slab = NULL;
 out:
@@ -2807,11 +2823,7 @@ void proto_unregister(struct proto *prot)
 		prot->slab = NULL;
 	}
 
-	if (prot->rsk_prot != NULL && prot->rsk_prot->slab != NULL) {
-		kmem_cache_destroy(prot->rsk_prot->slab);
-		kfree(prot->rsk_prot->slab_name);
-		prot->rsk_prot->slab = NULL;
-	}
+	req_prot_cleanup(prot->rsk_prot);
 
 	if (prot->twsk_prot != NULL && prot->twsk_prot->twsk_slab != NULL) {
 		kmem_cache_destroy(prot->twsk_prot->twsk_slab);

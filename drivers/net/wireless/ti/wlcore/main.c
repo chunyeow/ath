@@ -25,8 +25,8 @@
 #include <linux/firmware.h>
 #include <linux/etherdevice.h>
 #include <linux/vmalloc.h>
-#include <linux/wl12xx.h>
 #include <linux/interrupt.h>
+#include <linux/irq.h>
 
 #include "wlcore.h"
 #include "debug.h"
@@ -538,7 +538,7 @@ static int wlcore_irq_locked(struct wl1271 *wl)
 	 * In case edge triggered interrupt must be used, we cannot iterate
 	 * more than once without introducing race conditions with the hardirq.
 	 */
-	if (wl->platform_quirks & WL12XX_PLATFORM_QUIRK_EDGE_IRQ)
+	if (wl->irq_flags & (IRQF_TRIGGER_RISING | IRQF_TRIGGER_FALLING))
 		loopcount = 1;
 
 	wl1271_debug(DEBUG_IRQ, "IRQ work");
@@ -1785,8 +1785,10 @@ static int wl1271_op_suspend(struct ieee80211_hw *hw,
 	mutex_lock(&wl->mutex);
 
 	ret = wl1271_ps_elp_wakeup(wl);
-	if (ret < 0)
+	if (ret < 0) {
+		mutex_unlock(&wl->mutex);
 		return ret;
+	}
 
 	wl->wow_enabled = true;
 	wl12xx_for_each_wlvif(wl, wlvif) {
@@ -2552,6 +2554,7 @@ static int wl1271_op_add_interface(struct ieee80211_hw *hw,
 	}
 
 	vif->driver_flags |= IEEE80211_VIF_BEACON_FILTER |
+			     IEEE80211_VIF_SUPPORTS_UAPSD |
 			     IEEE80211_VIF_SUPPORTS_CQM_RSSI;
 
 	wl1271_debug(DEBUG_MAC80211, "mac80211 add interface type %d mac %pM",
@@ -3172,8 +3175,7 @@ static u64 wl1271_op_prepare_multicast(struct ieee80211_hw *hw,
 	return (u64)(unsigned long)fp;
 }
 
-#define WL1271_SUPPORTED_FILTERS (FIF_PROMISC_IN_BSS | \
-				  FIF_ALLMULTI | \
+#define WL1271_SUPPORTED_FILTERS (FIF_ALLMULTI | \
 				  FIF_FCSFAIL | \
 				  FIF_BCN_PRBRESP_PROMISC | \
 				  FIF_CONTROL | \
@@ -5661,14 +5663,15 @@ static void wlcore_op_sta_rc_update(struct ieee80211_hw *hw,
 	ieee80211_queue_work(hw, &wlvif->rc_update_work);
 }
 
-static int wlcore_op_get_rssi(struct ieee80211_hw *hw,
-			       struct ieee80211_vif *vif,
-			       struct ieee80211_sta *sta,
-			       s8 *rssi_dbm)
+static void wlcore_op_sta_statistics(struct ieee80211_hw *hw,
+				     struct ieee80211_vif *vif,
+				     struct ieee80211_sta *sta,
+				     struct station_info *sinfo)
 {
 	struct wl1271 *wl = hw->priv;
 	struct wl12xx_vif *wlvif = wl12xx_vif_to_data(vif);
-	int ret = 0;
+	s8 rssi_dbm;
+	int ret;
 
 	wl1271_debug(DEBUG_MAC80211, "mac80211 get_rssi");
 
@@ -5681,17 +5684,18 @@ static int wlcore_op_get_rssi(struct ieee80211_hw *hw,
 	if (ret < 0)
 		goto out_sleep;
 
-	ret = wlcore_acx_average_rssi(wl, wlvif, rssi_dbm);
+	ret = wlcore_acx_average_rssi(wl, wlvif, &rssi_dbm);
 	if (ret < 0)
 		goto out_sleep;
+
+	sinfo->filled |= BIT(NL80211_STA_INFO_SIGNAL);
+	sinfo->signal = rssi_dbm;
 
 out_sleep:
 	wl1271_ps_elp_sleep(wl);
 
 out:
 	mutex_unlock(&wl->mutex);
-
-	return ret;
 }
 
 static bool wl1271_tx_frames_pending(struct ieee80211_hw *hw)
@@ -5893,7 +5897,7 @@ static const struct ieee80211_ops wl1271_ops = {
 	.unassign_vif_chanctx = wlcore_op_unassign_vif_chanctx,
 	.switch_vif_chanctx = wlcore_op_switch_vif_chanctx,
 	.sta_rc_update = wlcore_op_sta_rc_update,
-	.get_rssi = wlcore_op_get_rssi,
+	.sta_statistics = wlcore_op_sta_statistics,
 	CFG80211_TESTMODE_CMD(wl1271_tm_cmd)
 };
 
@@ -5961,10 +5965,6 @@ static int wl12xx_get_hw_info(struct wl1271 *wl)
 {
 	int ret;
 
-	ret = wl12xx_set_power_on(wl);
-	if (ret < 0)
-		return ret;
-
 	ret = wlcore_read_reg(wl, REG_CHIP_ID_B, &wl->chip.id);
 	if (ret < 0)
 		goto out;
@@ -5980,7 +5980,6 @@ static int wl12xx_get_hw_info(struct wl1271 *wl)
 		ret = wl->ops->get_mac(wl);
 
 out:
-	wl1271_power_off(wl);
 	return ret;
 }
 
@@ -6064,7 +6063,6 @@ static int wl1271_init_ieee80211(struct wl1271 *wl)
 	wl->hw->flags = IEEE80211_HW_SIGNAL_DBM |
 		IEEE80211_HW_SUPPORTS_PS |
 		IEEE80211_HW_SUPPORTS_DYNAMIC_PS |
-		IEEE80211_HW_SUPPORTS_UAPSD |
 		IEEE80211_HW_HAS_RATE_CONTROL |
 		IEEE80211_HW_CONNECTION_MONITOR |
 		IEEE80211_HW_REPORTS_TX_ACK_STATUS |
@@ -6073,7 +6071,8 @@ static int wl1271_init_ieee80211(struct wl1271 *wl)
 		IEEE80211_HW_AMPDU_AGGREGATION |
 		IEEE80211_HW_TX_AMPDU_SETUP_IN_HW |
 		IEEE80211_HW_QUEUE_CONTROL |
-		IEEE80211_HW_CHANCTX_STA_CSA;
+		IEEE80211_HW_CHANCTX_STA_CSA |
+		IEEE80211_HW_SUPPORT_FAST_XMIT;
 
 	wl->hw->wiphy->cipher_suites = cipher_suites;
 	wl->hw->wiphy->n_cipher_suites = ARRAY_SIZE(cipher_suites);
@@ -6245,7 +6244,6 @@ struct ieee80211_hw *wlcore_alloc_hw(size_t priv_size, u32 aggr_buf_size,
 	wl->ap_ps_map = 0;
 	wl->ap_fw_ps_map = 0;
 	wl->quirks = 0;
-	wl->platform_quirks = 0;
 	wl->system_hlid = WL12XX_SYSTEM_HLID;
 	wl->active_sta_count = 0;
 	wl->active_link_count = 0;
@@ -6386,8 +6384,8 @@ static void wlcore_nvs_cb(const struct firmware *fw, void *context)
 	struct wl1271 *wl = context;
 	struct platform_device *pdev = wl->pdev;
 	struct wlcore_platdev_data *pdev_data = dev_get_platdata(&pdev->dev);
-	struct wl12xx_platform_data *pdata = pdev_data->pdata;
-	unsigned long irqflags;
+	struct resource *res;
+
 	int ret;
 	irq_handler_t hardirq_fn = NULL;
 
@@ -6414,21 +6412,37 @@ static void wlcore_nvs_cb(const struct firmware *fw, void *context)
 	/* adjust some runtime configuration parameters */
 	wlcore_adjust_conf(wl);
 
-	wl->irq = platform_get_irq(pdev, 0);
-	wl->platform_quirks = pdata->platform_quirks;
+	res = platform_get_resource(pdev, IORESOURCE_IRQ, 0);
+	if (!res) {
+		wl1271_error("Could not get IRQ resource");
+		goto out_free_nvs;
+	}
+
+	wl->irq = res->start;
+	wl->irq_flags = res->flags & IRQF_TRIGGER_MASK;
 	wl->if_ops = pdev_data->if_ops;
 
-	if (wl->platform_quirks & WL12XX_PLATFORM_QUIRK_EDGE_IRQ) {
-		irqflags = IRQF_TRIGGER_RISING;
+	if (wl->irq_flags & (IRQF_TRIGGER_RISING | IRQF_TRIGGER_FALLING))
 		hardirq_fn = wlcore_hardirq;
-	} else {
-		irqflags = IRQF_TRIGGER_HIGH | IRQF_ONESHOT;
+	else
+		wl->irq_flags |= IRQF_ONESHOT;
+
+	ret = wl12xx_set_power_on(wl);
+	if (ret < 0)
+		goto out_free_nvs;
+
+	ret = wl12xx_get_hw_info(wl);
+	if (ret < 0) {
+		wl1271_error("couldn't get hw info");
+		wl1271_power_off(wl);
+		goto out_free_nvs;
 	}
 
 	ret = request_threaded_irq(wl->irq, hardirq_fn, wlcore_irq,
-				   irqflags, pdev->name, wl);
+				   wl->irq_flags, pdev->name, wl);
 	if (ret < 0) {
-		wl1271_error("request_irq() failed: %d", ret);
+		wl1271_error("interrupt configuration failed");
+		wl1271_power_off(wl);
 		goto out_free_nvs;
 	}
 
@@ -6437,17 +6451,12 @@ static void wlcore_nvs_cb(const struct firmware *fw, void *context)
 	if (!ret) {
 		wl->irq_wake_enabled = true;
 		device_init_wakeup(wl->dev, 1);
-		if (pdata->pwr_in_suspend)
+		if (pdev_data->pwr_in_suspend)
 			wl->hw->wiphy->wowlan = &wlcore_wowlan_support;
 	}
 #endif
 	disable_irq(wl->irq);
-
-	ret = wl12xx_get_hw_info(wl);
-	if (ret < 0) {
-		wl1271_error("couldn't get hw info");
-		goto out_irq;
-	}
+	wl1271_power_off(wl);
 
 	ret = wl->ops->identify_chip(wl);
 	if (ret < 0)

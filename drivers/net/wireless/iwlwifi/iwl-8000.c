@@ -69,13 +69,13 @@
 #include "iwl-agn-hw.h"
 
 /* Highest firmware API version supported */
-#define IWL8000_UCODE_API_MAX	10
+#define IWL8000_UCODE_API_MAX	13
 
 /* Oldest version we won't warn about */
-#define IWL8000_UCODE_API_OK	10
+#define IWL8000_UCODE_API_OK	12
 
 /* Lowest firmware API version supported */
-#define IWL8000_UCODE_API_MIN	9
+#define IWL8000_UCODE_API_MIN	10
 
 /* NVM versions */
 #define IWL8000_NVM_VERSION		0x0a1d
@@ -84,6 +84,8 @@
 /* Memory offsets and lengths */
 #define IWL8260_DCCM_OFFSET		0x800000
 #define IWL8260_DCCM_LEN		0x18000
+#define IWL8260_DCCM2_OFFSET		0x880000
+#define IWL8260_DCCM2_LEN		0x8000
 #define IWL8260_SMEM_OFFSET		0x400000
 #define IWL8260_SMEM_LEN		0x68000
 
@@ -92,8 +94,8 @@
 	IWL8000_FW_PRE "-" __stringify(api) ".ucode"
 
 #define NVM_HW_SECTION_NUM_FAMILY_8000		10
-#define DEFAULT_NVM_FILE_FAMILY_8000A		"iwl_nvm_8000.bin"
-#define DEFAULT_NVM_FILE_FAMILY_8000		"iwl_nvm_8000B.bin"
+#define DEFAULT_NVM_FILE_FAMILY_8000B		"nvmData-8000B"
+#define DEFAULT_NVM_FILE_FAMILY_8000C		"nvmData-8000C"
 
 /* Max SDIO RX aggregation size of the ADDBA request/response */
 #define MAX_RX_AGG_SIZE_8260_SDIO	28
@@ -134,6 +136,8 @@ static const struct iwl_ht_params iwl8000_ht_params = {
 	.non_shared_ant = ANT_A,				\
 	.dccm_offset = IWL8260_DCCM_OFFSET,			\
 	.dccm_len = IWL8260_DCCM_LEN,				\
+	.dccm2_offset = IWL8260_DCCM2_OFFSET,			\
+	.dccm2_len = IWL8260_DCCM2_LEN,				\
 	.smem_offset = IWL8260_SMEM_OFFSET,			\
 	.smem_len = IWL8260_SMEM_LEN
 
@@ -156,6 +160,16 @@ const struct iwl_cfg iwl8260_2ac_cfg = {
 	.max_ht_ampdu_exponent = IEEE80211_HT_MAX_AMPDU_64K,
 };
 
+const struct iwl_cfg iwl4165_2ac_cfg = {
+	.name = "Intel(R) Dual Band Wireless AC 4165",
+	.fw_name_pre = IWL8000_FW_PRE,
+	IWL_DEVICE_8000,
+	.ht_params = &iwl8000_ht_params,
+	.nvm_ver = IWL8000_NVM_VERSION,
+	.nvm_calib_ver = IWL8000_TX_POWER_VERSION,
+	.max_ht_ampdu_exponent = IEEE80211_HT_MAX_AMPDU_64K,
+};
+
 const struct iwl_cfg iwl8260_2ac_sdio_cfg = {
 	.name = "Intel(R) Dual Band Wireless-AC 8260",
 	.fw_name_pre = IWL8000_FW_PRE,
@@ -163,8 +177,8 @@ const struct iwl_cfg iwl8260_2ac_sdio_cfg = {
 	.ht_params = &iwl8000_ht_params,
 	.nvm_ver = IWL8000_NVM_VERSION,
 	.nvm_calib_ver = IWL8000_TX_POWER_VERSION,
-	.default_nvm_file = DEFAULT_NVM_FILE_FAMILY_8000,
-	.default_nvm_file_8000A = DEFAULT_NVM_FILE_FAMILY_8000A,
+	.default_nvm_file_B_step = DEFAULT_NVM_FILE_FAMILY_8000B,
+	.default_nvm_file_C_step = DEFAULT_NVM_FILE_FAMILY_8000C,
 	.max_rx_agg_size = MAX_RX_AGG_SIZE_8260_SDIO,
 	.disable_dummy_notification = true,
 	.max_ht_ampdu_exponent  = MAX_HT_AMPDU_EXPONENT_8260_SDIO,
@@ -178,8 +192,8 @@ const struct iwl_cfg iwl4165_2ac_sdio_cfg = {
 	.ht_params = &iwl8000_ht_params,
 	.nvm_ver = IWL8000_NVM_VERSION,
 	.nvm_calib_ver = IWL8000_TX_POWER_VERSION,
-	.default_nvm_file = DEFAULT_NVM_FILE_FAMILY_8000,
-	.default_nvm_file_8000A = DEFAULT_NVM_FILE_FAMILY_8000A,
+	.default_nvm_file_B_step = DEFAULT_NVM_FILE_FAMILY_8000B,
+	.default_nvm_file_C_step = DEFAULT_NVM_FILE_FAMILY_8000C,
 	.max_rx_agg_size = MAX_RX_AGG_SIZE_8260_SDIO,
 	.bt_shared_single_ant = true,
 	.disable_dummy_notification = true,

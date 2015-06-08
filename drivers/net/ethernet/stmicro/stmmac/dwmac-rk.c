@@ -22,17 +22,21 @@
 #include <linux/phy.h>
 #include <linux/of_net.h>
 #include <linux/gpio.h>
+#include <linux/module.h>
 #include <linux/of_gpio.h>
 #include <linux/of_device.h>
+#include <linux/platform_device.h>
 #include <linux/regulator/consumer.h>
 #include <linux/delay.h>
 #include <linux/mfd/syscon.h>
 #include <linux/regmap.h>
 
+#include "stmmac_platform.h"
+
 struct rk_priv_data {
 	struct platform_device *pdev;
 	int phy_iface;
-	char regulator[32];
+	struct regulator *regulator;
 
 	bool clk_enabled;
 	bool clock_input;
@@ -287,47 +291,25 @@ static int gmac_clk_enable(struct rk_priv_data *bsp_priv, bool enable)
 
 static int phy_power_on(struct rk_priv_data *bsp_priv, bool enable)
 {
-	struct regulator *ldo;
-	char *ldostr = bsp_priv->regulator;
+	struct regulator *ldo = bsp_priv->regulator;
 	int ret;
 	struct device *dev = &bsp_priv->pdev->dev;
 
-	if (!ldostr) {
-		dev_err(dev, "%s: no ldo found\n", __func__);
+	if (!ldo) {
+		dev_err(dev, "%s: no regulator found\n", __func__);
 		return -1;
 	}
 
-	ldo = regulator_get(NULL, ldostr);
-	if (!ldo) {
-		dev_err(dev, "\n%s get ldo %s failed\n", __func__, ldostr);
+	if (enable) {
+		ret = regulator_enable(ldo);
+		if (ret)
+			dev_err(dev, "%s: fail to enable phy-supply\n",
+				__func__);
 	} else {
-		if (enable) {
-			if (!regulator_is_enabled(ldo)) {
-				regulator_set_voltage(ldo, 3300000, 3300000);
-				ret = regulator_enable(ldo);
-				if (ret != 0)
-					dev_err(dev, "%s: fail to enable %s\n",
-						__func__, ldostr);
-				else
-					dev_info(dev, "turn on ldo done.\n");
-			} else {
-				dev_warn(dev, "%s is enabled before enable",
-					 ldostr);
-			}
-		} else {
-			if (regulator_is_enabled(ldo)) {
-				ret = regulator_disable(ldo);
-				if (ret != 0)
-					dev_err(dev, "%s: fail to disable %s\n",
-						__func__, ldostr);
-				else
-					dev_info(dev, "turn off ldo done.\n");
-			} else {
-				dev_warn(dev, "%s is disabled before disable",
-					 ldostr);
-			}
-		}
-		regulator_put(ldo);
+		ret = regulator_disable(ldo);
+		if (ret)
+			dev_err(dev, "%s: fail to disable phy-supply\n",
+				__func__);
 	}
 
 	return 0;
@@ -347,14 +329,14 @@ static void *rk_gmac_setup(struct platform_device *pdev)
 
 	bsp_priv->phy_iface = of_get_phy_mode(dev->of_node);
 
-	ret = of_property_read_string(dev->of_node, "phy_regulator", &strings);
-	if (ret) {
-		dev_warn(dev, "%s: Can not read property: phy_regulator.\n",
-			 __func__);
-	} else {
-		dev_info(dev, "%s: PHY power controlled by regulator(%s).\n",
-			 __func__, strings);
-		strcpy(bsp_priv->regulator, strings);
+	bsp_priv->regulator = devm_regulator_get_optional(dev, "phy");
+	if (IS_ERR(bsp_priv->regulator)) {
+		if (PTR_ERR(bsp_priv->regulator) == -EPROBE_DEFER) {
+			dev_err(dev, "phy regulator is not available yet, deferred probing\n");
+			return ERR_PTR(-EPROBE_DEFER);
+		}
+		dev_err(dev, "no regulator found\n");
+		bsp_priv->regulator = NULL;
 	}
 
 	ret = of_property_read_string(dev->of_node, "clock_in_out", &strings);
@@ -450,10 +432,31 @@ static void rk_fix_speed(void *priv, unsigned int speed)
 		dev_err(dev, "unsupported interface %d", bsp_priv->phy_iface);
 }
 
-const struct stmmac_of_data rk3288_gmac_data = {
+static const struct stmmac_of_data rk3288_gmac_data = {
 	.has_gmac = 1,
 	.fix_mac_speed = rk_fix_speed,
 	.setup = rk_gmac_setup,
 	.init = rk_gmac_init,
 	.exit = rk_gmac_exit,
 };
+
+static const struct of_device_id rk_gmac_dwmac_match[] = {
+	{ .compatible = "rockchip,rk3288-gmac", .data = &rk3288_gmac_data},
+	{ }
+};
+MODULE_DEVICE_TABLE(of, rk_gmac_dwmac_match);
+
+static struct platform_driver rk_gmac_dwmac_driver = {
+	.probe  = stmmac_pltfr_probe,
+	.remove = stmmac_pltfr_remove,
+	.driver = {
+		.name           = "rk_gmac-dwmac",
+		.pm		= &stmmac_pltfr_pm_ops,
+		.of_match_table = rk_gmac_dwmac_match,
+	},
+};
+module_platform_driver(rk_gmac_dwmac_driver);
+
+MODULE_AUTHOR("Chen-Zhi (Roger Chen) <roger.chen@rock-chips.com>");
+MODULE_DESCRIPTION("Rockchip RK3288 DWMAC specific glue layer");
+MODULE_LICENSE("GPL");

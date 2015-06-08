@@ -70,6 +70,7 @@ void ovs_flow_stats_update(struct sw_flow *flow, __be16 tcp_flags,
 {
 	struct flow_stats *stats;
 	int node = numa_node_id();
+	int len = skb->len + (skb_vlan_tag_present(skb) ? VLAN_HLEN : 0);
 
 	stats = rcu_dereference(flow->stats[node]);
 
@@ -99,13 +100,15 @@ void ovs_flow_stats_update(struct sw_flow *flow, __be16 tcp_flags,
 
 				new_stats =
 					kmem_cache_alloc_node(flow_stats_cache,
-							      GFP_THISNODE |
+							      GFP_NOWAIT |
+							      __GFP_THISNODE |
+							      __GFP_NOWARN |
 							      __GFP_NOMEMALLOC,
 							      node);
 				if (likely(new_stats)) {
 					new_stats->used = jiffies;
 					new_stats->packet_count = 1;
-					new_stats->byte_count = skb->len;
+					new_stats->byte_count = len;
 					new_stats->tcp_flags = tcp_flags;
 					spin_lock_init(&new_stats->lock);
 
@@ -120,7 +123,7 @@ void ovs_flow_stats_update(struct sw_flow *flow, __be16 tcp_flags,
 
 	stats->used = jiffies;
 	stats->packet_count++;
-	stats->byte_count += skb->len;
+	stats->byte_count += len;
 	stats->tcp_flags |= tcp_flags;
 unlock:
 	spin_unlock(&stats->lock);
@@ -329,7 +332,7 @@ static __be16 parse_ethertype(struct sk_buff *skb)
 	proto = *(__be16 *) skb->data;
 	__skb_pull(skb, sizeof(__be16));
 
-	if (ntohs(proto) >= ETH_P_802_3_MIN)
+	if (eth_proto_is_802_3(proto))
 		return proto;
 
 	if (skb->len < sizeof(struct llc_snap_hdr))
@@ -346,7 +349,7 @@ static __be16 parse_ethertype(struct sk_buff *skb)
 
 	__skb_pull(skb, sizeof(struct llc_snap_hdr));
 
-	if (ntohs(llc->ethertype) >= ETH_P_802_3_MIN)
+	if (eth_proto_is_802_3(llc->ethertype))
 		return llc->ethertype;
 
 	return htons(ETH_P_802_2);
@@ -471,7 +474,7 @@ static int key_extract(struct sk_buff *skb, struct sw_flow_key *key)
 	 */
 
 	key->eth.tci = 0;
-	if (vlan_tx_tag_present(skb))
+	if (skb_vlan_tag_present(skb))
 		key->eth.tci = htons(skb->vlan_tci);
 	else if (eth->h_proto == htons(ETH_P_8021Q))
 		if (unlikely(parse_vlan(skb, key)))
@@ -690,7 +693,7 @@ int ovs_flow_key_extract(const struct ovs_tunnel_info *tun_info,
 			BUILD_BUG_ON((1 << (sizeof(tun_info->options_len) *
 						   8)) - 1
 					> sizeof(key->tun_opts));
-			memcpy(GENEVE_OPTS(key, tun_info->options_len),
+			memcpy(TUN_METADATA_OPTS(key, tun_info->options_len),
 			       tun_info->options, tun_info->options_len);
 			key->tun_opts_len = tun_info->options_len;
 		} else {
@@ -715,6 +718,8 @@ int ovs_flow_key_extract_userspace(const struct nlattr *attr,
 				   struct sw_flow_key *key, bool log)
 {
 	int err;
+
+	memset(key, 0, OVS_SW_FLOW_KEY_METADATA_SIZE);
 
 	/* Extract metadata from netlink attributes. */
 	err = ovs_nla_get_flow_metadata(attr, key, log);

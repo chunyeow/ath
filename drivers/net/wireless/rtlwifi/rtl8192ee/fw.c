@@ -666,7 +666,6 @@ void rtl92ee_set_fw_rsvdpagepkt(struct ieee80211_hw *hw, bool b_dl_finished)
 	struct sk_buff *skb = NULL;
 
 	u32 totalpacketlen;
-	bool rtstatus;
 	u8 u1rsvdpageloc[5] = { 0 };
 	bool b_dlok = false;
 
@@ -728,10 +727,7 @@ void rtl92ee_set_fw_rsvdpagepkt(struct ieee80211_hw *hw, bool b_dl_finished)
 	memcpy((u8 *)skb_put(skb, totalpacketlen),
 	       &reserved_page_packet, totalpacketlen);
 
-	rtstatus = rtl_cmd_send_packet(hw, skb);
-
-	if (rtstatus)
-		b_dlok = true;
+	b_dlok = true;
 
 	if (b_dlok) {
 		RT_TRACE(rtlpriv, COMP_POWER, DBG_LOUD ,
@@ -879,7 +875,7 @@ static void _rtl92ee_c2h_content_parsing(struct ieee80211_hw *hw, u8 c2h_cmd_id,
 		break;
 	default:
 		RT_TRACE(rtlpriv, COMP_FW, DBG_TRACE,
-			 "[C2H], Unkown packet!! CmdId(%#X)!\n", c2h_cmd_id);
+			 "[C2H], Unknown packet!! CmdId(%#X)!\n", c2h_cmd_id);
 		break;
 	}
 }

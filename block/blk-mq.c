@@ -41,7 +41,7 @@ static bool blk_mq_hctx_has_pending(struct blk_mq_hw_ctx *hctx)
 {
 	unsigned int i;
 
-	for (i = 0; i < hctx->ctx_map.map_size; i++)
+	for (i = 0; i < hctx->ctx_map.size; i++)
 		if (hctx->ctx_map.map[i].word)
 			return true;
 
@@ -77,13 +77,16 @@ static void blk_mq_hctx_clear_pending(struct blk_mq_hw_ctx *hctx,
 	clear_bit(CTX_TO_BIT(hctx, ctx), &bm->word);
 }
 
-static int blk_mq_queue_enter(struct request_queue *q)
+static int blk_mq_queue_enter(struct request_queue *q, gfp_t gfp)
 {
 	while (true) {
 		int ret;
 
 		if (percpu_ref_tryget_live(&q->mq_usage_counter))
 			return 0;
+
+		if (!(gfp & __GFP_WAIT))
+			return -EBUSY;
 
 		ret = wait_event_interruptible(q->mq_freeze_wq,
 				!q->mq_freeze_depth || blk_queue_dying(q));
@@ -107,7 +110,7 @@ static void blk_mq_usage_counter_release(struct percpu_ref *ref)
 	wake_up_all(&q->mq_freeze_wq);
 }
 
-static void blk_mq_freeze_queue_start(struct request_queue *q)
+void blk_mq_freeze_queue_start(struct request_queue *q)
 {
 	bool freeze;
 
@@ -117,9 +120,10 @@ static void blk_mq_freeze_queue_start(struct request_queue *q)
 
 	if (freeze) {
 		percpu_ref_kill(&q->mq_usage_counter);
-		blk_mq_run_queues(q, false);
+		blk_mq_run_hw_queues(q, false);
 	}
 }
+EXPORT_SYMBOL_GPL(blk_mq_freeze_queue_start);
 
 static void blk_mq_freeze_queue_wait(struct request_queue *q)
 {
@@ -135,8 +139,9 @@ void blk_mq_freeze_queue(struct request_queue *q)
 	blk_mq_freeze_queue_start(q);
 	blk_mq_freeze_queue_wait(q);
 }
+EXPORT_SYMBOL_GPL(blk_mq_freeze_queue);
 
-static void blk_mq_unfreeze_queue(struct request_queue *q)
+void blk_mq_unfreeze_queue(struct request_queue *q)
 {
 	bool wake;
 
@@ -148,6 +153,24 @@ static void blk_mq_unfreeze_queue(struct request_queue *q)
 		percpu_ref_reinit(&q->mq_usage_counter);
 		wake_up_all(&q->mq_freeze_wq);
 	}
+}
+EXPORT_SYMBOL_GPL(blk_mq_unfreeze_queue);
+
+void blk_mq_wake_waiters(struct request_queue *q)
+{
+	struct blk_mq_hw_ctx *hctx;
+	unsigned int i;
+
+	queue_for_each_hw_ctx(q, hctx, i)
+		if (blk_mq_hw_queue_mapped(hctx))
+			blk_mq_tag_wakeup_all(hctx->tags, true);
+
+	/*
+	 * If we are called because the queue has now been marked as
+	 * dying, we need to ensure that processes currently waiting on
+	 * the queue are notified as well.
+	 */
+	wake_up_all(&q->mq_freeze_wq);
 }
 
 bool blk_mq_can_queue(struct blk_mq_hw_ctx *hctx)
@@ -236,7 +259,7 @@ struct request *blk_mq_alloc_request(struct request_queue *q, int rw, gfp_t gfp,
 	struct blk_mq_alloc_data alloc_data;
 	int ret;
 
-	ret = blk_mq_queue_enter(q);
+	ret = blk_mq_queue_enter(q, gfp);
 	if (ret)
 		return ERR_PTR(ret);
 
@@ -258,8 +281,10 @@ struct request *blk_mq_alloc_request(struct request_queue *q, int rw, gfp_t gfp,
 		ctx = alloc_data.ctx;
 	}
 	blk_mq_put_ctx(ctx);
-	if (!rq)
+	if (!rq) {
+		blk_mq_queue_exit(q);
 		return ERR_PTR(-EWOULDBLOCK);
+	}
 	return rq;
 }
 EXPORT_SYMBOL(blk_mq_alloc_request);
@@ -383,6 +408,12 @@ void blk_mq_complete_request(struct request *rq)
 }
 EXPORT_SYMBOL(blk_mq_complete_request);
 
+int blk_mq_request_started(struct request *rq)
+{
+	return test_bit(REQ_ATOM_STARTED, &rq->atomic_flags);
+}
+EXPORT_SYMBOL_GPL(blk_mq_request_started);
+
 void blk_mq_start_request(struct request *rq)
 {
 	struct request_queue *q = rq->q;
@@ -500,11 +531,37 @@ void blk_mq_add_to_requeue_list(struct request *rq, bool at_head)
 }
 EXPORT_SYMBOL(blk_mq_add_to_requeue_list);
 
+void blk_mq_cancel_requeue_work(struct request_queue *q)
+{
+	cancel_work_sync(&q->requeue_work);
+}
+EXPORT_SYMBOL_GPL(blk_mq_cancel_requeue_work);
+
 void blk_mq_kick_requeue_list(struct request_queue *q)
 {
 	kblockd_schedule_work(&q->requeue_work);
 }
 EXPORT_SYMBOL(blk_mq_kick_requeue_list);
+
+void blk_mq_abort_requeue_list(struct request_queue *q)
+{
+	unsigned long flags;
+	LIST_HEAD(rq_list);
+
+	spin_lock_irqsave(&q->requeue_lock, flags);
+	list_splice_init(&q->requeue_list, &rq_list);
+	spin_unlock_irqrestore(&q->requeue_lock, flags);
+
+	while (!list_empty(&rq_list)) {
+		struct request *rq;
+
+		rq = list_first_entry(&rq_list, struct request, queuelist);
+		list_del_init(&rq->queuelist);
+		rq->errors = -EIO;
+		blk_mq_end_request(rq, rq->errors);
+	}
+}
+EXPORT_SYMBOL(blk_mq_abort_requeue_list);
 
 static inline bool is_flush_request(struct request *rq,
 		struct blk_flush_queue *fq, unsigned int tag)
@@ -566,13 +623,24 @@ void blk_mq_rq_timed_out(struct request *req, bool reserved)
 		break;
 	}
 }
-		
+
 static void blk_mq_check_expired(struct blk_mq_hw_ctx *hctx,
 		struct request *rq, void *priv, bool reserved)
 {
 	struct blk_mq_timeout_data *data = priv;
 
-	if (!test_bit(REQ_ATOM_STARTED, &rq->atomic_flags))
+	if (!test_bit(REQ_ATOM_STARTED, &rq->atomic_flags)) {
+		/*
+		 * If a request wasn't started before the queue was
+		 * marked dying, kill it here or it'll go unnoticed.
+		 */
+		if (unlikely(blk_queue_dying(rq->q))) {
+			rq->errors = -EIO;
+			blk_mq_complete_request(rq);
+		}
+		return;
+	}
+	if (rq->cmd_flags & REQ_NO_TIMEOUT)
 		return;
 
 	if (time_after_eq(jiffies, rq->deadline)) {
@@ -609,8 +677,11 @@ static void blk_mq_rq_timer(unsigned long priv)
 		data.next = blk_rq_timeout(round_jiffies_up(data.next));
 		mod_timer(&q->timeout, data.next);
 	} else {
-		queue_for_each_hw_ctx(q, hctx, i)
-			blk_mq_tag_idle(hctx);
+		queue_for_each_hw_ctx(q, hctx, i) {
+			/* the hctx may be unmapped, so check it here */
+			if (blk_mq_hw_queue_mapped(hctx))
+				blk_mq_tag_idle(hctx);
+		}
 	}
 }
 
@@ -662,7 +733,7 @@ static void flush_busy_ctxs(struct blk_mq_hw_ctx *hctx, struct list_head *list)
 	struct blk_mq_ctx *ctx;
 	int i;
 
-	for (i = 0; i < hctx->ctx_map.map_size; i++) {
+	for (i = 0; i < hctx->ctx_map.size; i++) {
 		struct blk_align_bitmap *bm = &hctx->ctx_map.map[i];
 		unsigned int off, bit;
 
@@ -787,6 +858,16 @@ static void __blk_mq_run_hw_queue(struct blk_mq_hw_ctx *hctx)
 		spin_lock(&hctx->lock);
 		list_splice(&rq_list, &hctx->dispatch);
 		spin_unlock(&hctx->lock);
+		/*
+		 * the queue is expected stopped with BLK_MQ_RQ_QUEUE_BUSY, but
+		 * it's possible the queue is stopped and restarted again
+		 * before this. Queue restart will dispatch requests. And since
+		 * requests in rq_list aren't added into hctx->dispatch yet,
+		 * the requests in rq_list might get lost.
+		 *
+		 * blk_mq_run_hw_queue() already checks the STOPPED bit
+		 **/
+		blk_mq_run_hw_queue(hctx, true);
 	}
 }
 
@@ -838,7 +919,7 @@ void blk_mq_run_hw_queue(struct blk_mq_hw_ctx *hctx, bool async)
 			&hctx->run_work, 0);
 }
 
-void blk_mq_run_queues(struct request_queue *q, bool async)
+void blk_mq_run_hw_queues(struct request_queue *q, bool async)
 {
 	struct blk_mq_hw_ctx *hctx;
 	int i;
@@ -852,7 +933,7 @@ void blk_mq_run_queues(struct request_queue *q, bool async)
 		blk_mq_run_hw_queue(hctx, async);
 	}
 }
-EXPORT_SYMBOL(blk_mq_run_queues);
+EXPORT_SYMBOL(blk_mq_run_hw_queues);
 
 void blk_mq_stop_hw_queue(struct blk_mq_hw_ctx *hctx)
 {
@@ -889,7 +970,6 @@ void blk_mq_start_hw_queues(struct request_queue *q)
 		blk_mq_start_hw_queue(hctx);
 }
 EXPORT_SYMBOL(blk_mq_start_hw_queues);
-
 
 void blk_mq_start_stopped_hw_queues(struct request_queue *q, bool async)
 {
@@ -1122,7 +1202,7 @@ static struct request *blk_mq_map_request(struct request_queue *q,
 	int rw = bio_data_dir(bio);
 	struct blk_mq_alloc_data alloc_data;
 
-	if (unlikely(blk_mq_queue_enter(q))) {
+	if (unlikely(blk_mq_queue_enter(q, GFP_KERNEL))) {
 		bio_endio(bio, -EIO);
 		return NULL;
 	}
@@ -1359,7 +1439,8 @@ static struct blk_mq_tags *blk_mq_init_rq_map(struct blk_mq_tag_set *set,
 	size_t rq_size, left;
 
 	tags = blk_mq_init_tags(set->queue_depth, set->reserved_tags,
-				set->numa_node);
+				set->numa_node,
+				BLK_MQ_FLAG_TO_ALLOC_POLICY(set->flags));
 	if (!tags)
 		return NULL;
 
@@ -1392,7 +1473,7 @@ static struct blk_mq_tags *blk_mq_init_rq_map(struct blk_mq_tag_set *set,
 
 		do {
 			page = alloc_pages_node(set->numa_node,
-				GFP_KERNEL | __GFP_NOWARN | __GFP_NORETRY,
+				GFP_KERNEL | __GFP_NOWARN | __GFP_NORETRY | __GFP_ZERO,
 				this_order);
 			if (page)
 				break;
@@ -1414,8 +1495,6 @@ static struct blk_mq_tags *blk_mq_init_rq_map(struct blk_mq_tag_set *set,
 		left -= to_do * rq_size;
 		for (j = 0; j < to_do; j++) {
 			tags->rqs[i] = p;
-			tags->rqs[i]->atomic_flags = 0;
-			tags->rqs[i]->cmd_flags = 0;
 			if (set->ops->init_request) {
 				if (set->ops->init_request(set->driver_data,
 						tags->rqs[i], hctx_idx, i,
@@ -1453,8 +1532,6 @@ static int blk_mq_alloc_bitmap(struct blk_mq_ctxmap *bitmap, int node)
 					GFP_KERNEL, node);
 	if (!bitmap->map)
 		return -ENOMEM;
-
-	bitmap->map_size = num_maps;
 
 	total = nr_cpu_ids;
 	for (i = 0; i < num_maps; i++) {
@@ -1507,22 +1584,6 @@ static int blk_mq_hctx_cpu_offline(struct blk_mq_hw_ctx *hctx, int cpu)
 	return NOTIFY_OK;
 }
 
-static int blk_mq_hctx_cpu_online(struct blk_mq_hw_ctx *hctx, int cpu)
-{
-	struct request_queue *q = hctx->queue;
-	struct blk_mq_tag_set *set = q->tag_set;
-
-	if (set->tags[hctx->queue_num])
-		return NOTIFY_OK;
-
-	set->tags[hctx->queue_num] = blk_mq_init_rq_map(set, hctx->queue_num);
-	if (!set->tags[hctx->queue_num])
-		return NOTIFY_STOP;
-
-	hctx->tags = set->tags[hctx->queue_num];
-	return NOTIFY_OK;
-}
-
 static int blk_mq_hctx_notify(void *data, unsigned long action,
 			      unsigned int cpu)
 {
@@ -1530,8 +1591,11 @@ static int blk_mq_hctx_notify(void *data, unsigned long action,
 
 	if (action == CPU_DEAD || action == CPU_DEAD_FROZEN)
 		return blk_mq_hctx_cpu_offline(hctx, cpu);
-	else if (action == CPU_ONLINE || action == CPU_ONLINE_FROZEN)
-		return blk_mq_hctx_cpu_online(hctx, cpu);
+
+	/*
+	 * In case of CPU online, tags may be reallocated
+	 * in blk_mq_map_swqueue() after mapping is updated.
+	 */
 
 	return NOTIFY_OK;
 }
@@ -1577,10 +1641,8 @@ static void blk_mq_free_hw_queues(struct request_queue *q,
 	struct blk_mq_hw_ctx *hctx;
 	unsigned int i;
 
-	queue_for_each_hw_ctx(q, hctx, i) {
+	queue_for_each_hw_ctx(q, hctx, i)
 		free_cpumask_var(hctx->cpumask);
-		kfree(hctx);
-	}
 }
 
 static int blk_mq_init_hctx(struct request_queue *q,
@@ -1601,7 +1663,6 @@ static int blk_mq_init_hctx(struct request_queue *q,
 	hctx->queue = q;
 	hctx->queue_num = hctx_idx;
 	hctx->flags = set->flags;
-	hctx->cmd_size = set->cmd_size;
 
 	blk_mq_init_cpu_notifier(&hctx->cpu_notifier,
 					blk_mq_hctx_notify, hctx);
@@ -1699,8 +1760,6 @@ static void blk_mq_init_cpu_queues(struct request_queue *q,
 			continue;
 
 		hctx = q->mq_ops->map_queue(q, i);
-		cpumask_set_cpu(i, hctx->cpumask);
-		hctx->nr_ctx++;
 
 		/*
 		 * Set local node, IFF we have more than one hw queue. If
@@ -1716,6 +1775,7 @@ static void blk_mq_map_swqueue(struct request_queue *q)
 	unsigned int i;
 	struct blk_mq_hw_ctx *hctx;
 	struct blk_mq_ctx *ctx;
+	struct blk_mq_tag_set *set = q->tag_set;
 
 	queue_for_each_hw_ctx(q, hctx, i) {
 		cpumask_clear(hctx->cpumask);
@@ -1737,20 +1797,33 @@ static void blk_mq_map_swqueue(struct request_queue *q)
 	}
 
 	queue_for_each_hw_ctx(q, hctx, i) {
+		struct blk_mq_ctxmap *map = &hctx->ctx_map;
+
 		/*
 		 * If no software queues are mapped to this hardware queue,
 		 * disable it and free the request entries.
 		 */
 		if (!hctx->nr_ctx) {
-			struct blk_mq_tag_set *set = q->tag_set;
-
 			if (set->tags[i]) {
 				blk_mq_free_rq_map(set, set->tags[i], i);
 				set->tags[i] = NULL;
-				hctx->tags = NULL;
 			}
+			hctx->tags = NULL;
 			continue;
 		}
+
+		/* unmapped hw queue can be remapped after CPU topo changed */
+		if (!set->tags[i])
+			set->tags[i] = blk_mq_init_rq_map(set, i);
+		hctx->tags = set->tags[i];
+		WARN_ON(!hctx->tags);
+
+		/*
+		 * Set the map size to the number of mapped software queues.
+		 * This is more accurate and more efficient than looping
+		 * over all possibly mapped software queues.
+		 */
+		map->size = DIV_ROUND_UP(hctx->nr_ctx, map->bits_per_word);
 
 		/*
 		 * Initialize batch roundrobin counts
@@ -1806,11 +1879,48 @@ static void blk_mq_add_queue_tag_set(struct blk_mq_tag_set *set,
 	mutex_unlock(&set->tag_list_lock);
 }
 
+/*
+ * It is the actual release handler for mq, but we do it from
+ * request queue's release handler for avoiding use-after-free
+ * and headache because q->mq_kobj shouldn't have been introduced,
+ * but we can't group ctx/kctx kobj without it.
+ */
+void blk_mq_release(struct request_queue *q)
+{
+	struct blk_mq_hw_ctx *hctx;
+	unsigned int i;
+
+	/* hctx kobj stays in hctx */
+	queue_for_each_hw_ctx(q, hctx, i)
+		kfree(hctx);
+
+	kfree(q->queue_hw_ctx);
+
+	/* ctx kobj stays in queue_ctx */
+	free_percpu(q->queue_ctx);
+}
+
 struct request_queue *blk_mq_init_queue(struct blk_mq_tag_set *set)
+{
+	struct request_queue *uninit_q, *q;
+
+	uninit_q = blk_alloc_queue_node(GFP_KERNEL, set->numa_node);
+	if (!uninit_q)
+		return ERR_PTR(-ENOMEM);
+
+	q = blk_mq_init_allocated_queue(set, uninit_q);
+	if (IS_ERR(q))
+		blk_cleanup_queue(uninit_q);
+
+	return q;
+}
+EXPORT_SYMBOL(blk_mq_init_queue);
+
+struct request_queue *blk_mq_init_allocated_queue(struct blk_mq_tag_set *set,
+						  struct request_queue *q)
 {
 	struct blk_mq_hw_ctx **hctxs;
 	struct blk_mq_ctx __percpu *ctx;
-	struct request_queue *q;
 	unsigned int *map;
 	int i;
 
@@ -1845,20 +1955,16 @@ struct request_queue *blk_mq_init_queue(struct blk_mq_tag_set *set)
 		hctxs[i]->queue_num = i;
 	}
 
-	q = blk_alloc_queue_node(GFP_KERNEL, set->numa_node);
-	if (!q)
-		goto err_hctxs;
-
 	/*
 	 * Init percpu_ref in atomic mode so that it's faster to shutdown.
 	 * See blk_register_queue() for details.
 	 */
 	if (percpu_ref_init(&q->mq_usage_counter, blk_mq_usage_counter_release,
 			    PERCPU_REF_INIT_ATOMIC, GFP_KERNEL))
-		goto err_map;
+		goto err_hctxs;
 
 	setup_timer(&q->timeout, blk_mq_rq_timer, (unsigned long) q);
-	blk_queue_rq_timeout(q, 30000);
+	blk_queue_rq_timeout(q, set->timeout ? set->timeout : 30000);
 
 	q->nr_queues = nr_cpu_ids;
 	q->nr_hw_queues = set->nr_hw_queues;
@@ -1884,9 +1990,6 @@ struct request_queue *blk_mq_init_queue(struct blk_mq_tag_set *set)
 	else
 		blk_queue_make_request(q, blk_sq_make_request);
 
-	if (set->timeout)
-		blk_queue_rq_timeout(q, set->timeout);
-
 	/*
 	 * Do this after blk_queue_make_request() overrides it...
 	 */
@@ -1898,7 +2001,7 @@ struct request_queue *blk_mq_init_queue(struct blk_mq_tag_set *set)
 	blk_mq_init_cpu_queues(q, set->nr_hw_queues);
 
 	if (blk_mq_init_hw_queues(q, set))
-		goto err_hw;
+		goto err_hctxs;
 
 	mutex_lock(&all_q_mutex);
 	list_add_tail(&q->all_q_node, &all_q_list);
@@ -1910,8 +2013,6 @@ struct request_queue *blk_mq_init_queue(struct blk_mq_tag_set *set)
 
 	return q;
 
-err_hw:
-	blk_cleanup_queue(q);
 err_hctxs:
 	kfree(map);
 	for (i = 0; i < set->nr_hw_queues; i++) {
@@ -1926,7 +2027,7 @@ err_percpu:
 	free_percpu(ctx);
 	return ERR_PTR(-ENOMEM);
 }
-EXPORT_SYMBOL(blk_mq_init_queue);
+EXPORT_SYMBOL(blk_mq_init_allocated_queue);
 
 void blk_mq_free_queue(struct request_queue *q)
 {
@@ -1939,12 +2040,8 @@ void blk_mq_free_queue(struct request_queue *q)
 
 	percpu_ref_exit(&q->mq_usage_counter);
 
-	free_percpu(q->queue_ctx);
-	kfree(q->queue_hw_ctx);
 	kfree(q->mq_map);
 
-	q->queue_ctx = NULL;
-	q->queue_hw_ctx = NULL;
 	q->mq_map = NULL;
 
 	mutex_lock(&all_q_mutex);
@@ -1998,8 +2095,15 @@ static int blk_mq_queue_reinit_notify(struct notifier_block *nb,
 	 */
 	list_for_each_entry(q, &all_q_list, all_q_node)
 		blk_mq_freeze_queue_start(q);
-	list_for_each_entry(q, &all_q_list, all_q_node)
+	list_for_each_entry(q, &all_q_list, all_q_node) {
 		blk_mq_freeze_queue_wait(q);
+
+		/*
+		 * timeout handler can't touch hw queue during the
+		 * reinitialization
+		 */
+		del_timer_sync(&q->timeout);
+	}
 
 	list_for_each_entry(q, &all_q_list, all_q_node)
 		blk_mq_queue_reinit(q);
@@ -2082,7 +2186,7 @@ int blk_mq_alloc_tag_set(struct blk_mq_tag_set *set)
 	if (set->queue_depth < set->reserved_tags + BLK_MQ_TAG_MIN)
 		return -EINVAL;
 
-	if (!set->nr_hw_queues || !set->ops->queue_rq || !set->ops->map_queue)
+	if (!set->ops->queue_rq || !set->ops->map_queue)
 		return -EINVAL;
 
 	if (set->queue_depth > BLK_MQ_MAX_DEPTH) {
